@@ -1,0 +1,73 @@
+{
+  "method": "CSNG + native Power Grid Model batch screening",
+  "benchmark": "csng",
+  "projection_method": "inward_clip_v1",
+  "diversity_loss_enabled": true,
+  "power_grid_model_version": "1.13.154",
+  "checkpoint": "D:\\desk\\TBSI\\2026_8_generative_SMPC\\code\\14_case\\Neural_network\\generator_tcn_clip.pt",
+  "data_split": "test",
+  "n_instances": 500,
+  "candidates_per_instance": 50,
+  "native_batch_points_per_instance": 15050,
+  "feasible_instances": 500,
+  "feasibility_rate": 1.0,
+  "inference_warmup_seconds": 2.4585267000074964,
+  "time_seconds": {
+    "mean": 0.19983970239997143,
+    "median": 0.2126159000035841,
+    "p95": 0.2444645000214222
+  },
+  "generation_seconds": {
+    "mean": 0.051973232999676836,
+    "median": 0.06501785000727978,
+    "p95": 0.08882874999835616
+  },
+  "pgm_batch_seconds": {
+    "mean": 0.0828921740000369,
+    "median": 0.08240729999670293,
+    "p95": 0.09636363999161403
+  },
+  "pgm_prepare_seconds": {
+    "mean": 0.008046807800070383,
+    "median": 0.007764800000586547,
+    "p95": 0.0108078999837744
+  },
+  "pgm_power_flow_seconds": {
+    "mean": 0.07269089819997317,
+    "median": 0.07212040000013076,
+    "p95": 0.08585975999012588
+  },
+  "pgm_extract_seconds": {
+    "mean": 0.002123157200345304,
+    "median": 0.0018477999838069081,
+    "p95": 0.0029935750048025508
+  },
+  "constraint_evaluation_seconds": {
+    "mean": 0.06497429540025769,
+    "median": 0.06384104999597184,
+    "p95": 0.07565696002129697
+  },
+  "best_cost": {
+    "mean": 35310.72708795798,
+    "median": 35848.265082453276,
+    "p95": 37910.67647294632
+  },
+  "feasible_solution_cost": {
+    "mean": 35310.72708795798,
+    "median": 35848.265082453276,
+    "p95": 37910.67647294632
+  },
+  "all_solution_cost": {
+    "mean": 35310.72708795798,
+    "median": 35848.265082453276,
+    "p95": 37910.67647294632
+  },
+  "cost_available_instances": 500,
+  "cost_unavailable_instances": 0,
+  "pandapower_equivalence_passed": null,
+  "ramp_fraction_of_pmax": 0.25,
+  "feasibility_tolerance": 0.0001,
+  "balance_tolerance_mva": 1e-05,
+  "pgm_error_tolerance": 1e-08,
+  "seed": 2026
+}

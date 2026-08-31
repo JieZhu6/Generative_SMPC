@@ -1,0 +1,152 @@
+{
+  "protocol": {
+    "checkpoint": "D:\\desk\\TBSI\\2026_8_generative_SMPC\\code\\14_case\\Neural_network\\generator_tcn.pt",
+    "best_checkpoint_epoch": 102,
+    "backend": "frozen DECS completion with reconstructed AC inequalities",
+    "backend_note": "This broad distribution evaluation matches generator training. Use evaluate_generator_tcn.py for exact pandapower certification.",
+    "test_instances": 500,
+    "test_index_min": 9,
+    "test_index_max": 4991,
+    "candidates_per_instance": 50,
+    "feasibility_tolerance": 1e-06,
+    "latent_seed": 2055,
+    "ramp_fraction_of_pmax": 0.25
+  },
+  "economics": {
+    "all_candidate_horizon_cost": {
+      "count": 25000,
+      "mean": 46766.870653828126,
+      "std": 4856.161654627117,
+      "median": 48277.623046875,
+      "p05": 34454.459375,
+      "p95": 51696.0712890625
+    },
+    "best_candidate_cost_per_instance": {
+      "count": 500,
+      "mean": 37888.10585546875,
+      "std": 4539.452983485783,
+      "median": 37339.185546875,
+      "p05": 31406.2546875,
+      "p95": 46581.7185546875
+    },
+    "best_feasible_cost_per_hit_instance": {
+      "count": 1,
+      "mean": 30996.91015625,
+      "std": 0.0,
+      "median": 30996.91015625,
+      "p05": 30996.91015625,
+      "p95": 30996.91015625
+    }
+  },
+  "feasibility": {
+    "candidate_feasible_rate": 4e-05,
+    "instance_hit_rate": 0.002,
+    "hit_instances": 1,
+    "candidate_max_normalized_violation": {
+      "count": 25000,
+      "mean": 1.382988359371312,
+      "std": 0.875855494159695,
+      "median": 1.1837154626846313,
+      "p05": 0.2942258298397064,
+      "p95": 3.2937567710876454
+    },
+    "candidate_mean_normalized_violation": {
+      "count": 25000,
+      "mean": 0.001111317216852574,
+      "std": 0.0005673772458459804,
+      "median": 0.0010472855647094548,
+      "p05": 0.0002956113588879816,
+      "p95": 0.002305073686875403
+    },
+    "near_feasible_rate_at_1e-3": 8e-05,
+    "near_feasible_rate_at_1e-2": 0.00016,
+    "category_max_normalized_violation": {
+      "pg": {
+        "count": 25000,
+        "mean": 0.0,
+        "std": 0.0,
+        "median": 0.0,
+        "p05": 0.0,
+        "p95": 0.0
+      },
+      "qg": {
+        "count": 25000,
+        "mean": 1.3829516016663983,
+        "std": 0.8759061348775465,
+        "median": 1.1837154626846313,
+        "p05": 0.29413457959890366,
+        "p95": 3.2937567710876454
+      },
+      "voltage": {
+        "count": 25000,
+        "mean": 0.06787956408268656,
+        "std": 0.09458886994850946,
+        "median": 0.0,
+        "p05": 0.0,
+        "p95": 0.2702901557087898
+      },
+      "angle": {
+        "count": 25000,
+        "mean": 0.0,
+        "std": 0.0,
+        "median": 0.0,
+        "p05": 0.0,
+        "p95": 0.0
+      },
+      "thermal": {
+        "count": 25000,
+        "mean": 0.0,
+        "std": 0.0,
+        "median": 0.0,
+        "p05": 0.0,
+        "p95": 0.0
+      },
+      "ramp": {
+        "count": 25000,
+        "mean": 0.0,
+        "std": 0.0,
+        "median": 0.0,
+        "p05": 0.0,
+        "p95": 0.0
+      }
+    }
+  },
+  "diversity": {
+    "definition": {
+      "first_stage": "Euclidean pair distance in paper-style centered [-1,1] coordinates",
+      "trajectory": "RMS pair distance over globally normalized time-variable coordinates"
+    },
+    "first_stage_pairwise_distance": {
+      "count": 612500,
+      "mean": 2.5499561142436353,
+      "std": 0.7069046204459442,
+      "median": 2.5961326360702515,
+      "p05": 1.2584465384483337,
+      "p95": 3.6199329257011414
+    },
+    "trajectory_pairwise_rms_distance": {
+      "count": 612500,
+      "mean": 0.18722575773674804,
+      "std": 0.08718157900575314,
+      "median": 0.16688720881938934,
+      "p05": 0.07757168263196945,
+      "p95": 0.38148744702339155
+    },
+    "instance_mean_first_stage_distance": {
+      "count": 500,
+      "mean": 2.549956117153168,
+      "std": 0.05925315674659091,
+      "median": 2.5486373901367188,
+      "p05": 2.447312557697296,
+      "p95": 2.64805805683136
+    },
+    "instance_mean_trajectory_distance": {
+      "count": 500,
+      "mean": 0.1872257578074932,
+      "std": 0.034994472407506305,
+      "median": 0.17829737812280655,
+      "p05": 0.14603617265820504,
+      "p95": 0.2543517678976059
+    }
+  }
+}

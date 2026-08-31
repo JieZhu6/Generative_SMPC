@@ -1,0 +1,61 @@
+{
+  "dataset_type": "smpc_base",
+  "case_name": "pglib_opf_case14_ieee",
+  "n_bus": 14,
+  "n_gen": 5,
+  "active_generators": [
+    1,
+    2
+  ],
+  "n_instances": 5000,
+  "n_scenarios": 20,
+  "horizon": 16,
+  "forecast_deviation": 0.1,
+  "load_scale_min": 0.8,
+  "load_scale_max": 1.1,
+  "rho": 0.82,
+  "seed": 2026,
+  "first_stage_ramp": false,
+  "recourse_ramp": true,
+  "load_buses": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "load_channels": [
+    "P_net",
+    "Q_net"
+  ],
+  "pooling_order": [
+    "minimum",
+    "mean",
+    "maximum"
+  ],
+  "split": {
+    "ratio": [
+      0.8,
+      0.1,
+      0.1
+    ],
+    "seed": 2027,
+    "counts": {
+      "train": 4000,
+      "validation": 500,
+      "test": 500
+    }
+  },
+  "feasibility_strategy": {
+    "method": "conservative asymmetric load-range sampling",
+    "solver_called_during_generation": false,
+    "formally_certified": false,
+    "note": "Feasibility is evaluated by the downstream training/test pipeline."
+  }
+}

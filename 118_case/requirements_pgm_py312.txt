@@ -1,0 +1,15 @@
+# Python 3.12 environment for native PGM batch evaluation.
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+numpy==2.3.5
+scipy==1.16.3
+pandas==2.3.3
+numba==0.62.1
+power-grid-model==1.13.154
+pandapower==3.4.0
+torch==2.5.1+cu121
+pyomo==6.8.0
+pyarrow==25.0.1
+matplotlib==3.11.1
+numexpr==2.14.2
+bottleneck==1.6.0

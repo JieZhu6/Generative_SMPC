@@ -1,0 +1,57 @@
+{
+  "method": "Deterministic-TCN + native Power Grid Model validation",
+  "power_grid_model_version": "1.13.154",
+  "checkpoint": "D:\\desk\\TBSI\\2026_8_generative_SMPC\\code\\14_case\\Neural_network\\deterministic_tcn.pt",
+  "data_split": "test",
+  "n_instances": 500,
+  "candidates_per_instance": 1,
+  "feasible_instances": 231,
+  "feasibility_rate": 0.462,
+  "deterministic_model_load_seconds": 3.715814600000158,
+  "pgm_setup_seconds": 0.009928899991791695,
+  "inference_warmup_seconds": 2.89940779999597,
+  "neural_time_excludes_pgm_validation": true,
+  "time_seconds": {
+    "mean": 0.00734425719967112,
+    "median": 0.004469649997190572,
+    "p95": 0.022248010007024276
+  },
+  "generation_seconds": {
+    "mean": 0.00734425719967112,
+    "median": 0.004469649997190572,
+    "p95": 0.022248010007024276
+  },
+  "pgm_validation_seconds": {
+    "mean": 0.015967052000109106,
+    "median": 0.015609599999152124,
+    "p95": 0.018198945002222897
+  },
+  "pgm_power_flow_seconds": {
+    "mean": 0.01305601459997706,
+    "median": 0.012746699983836152,
+    "p95": 0.015233694984635799
+  },
+  "best_cost": {
+    "mean": 35140.63606185786,
+    "median": 35605.23467595485,
+    "p95": 37819.63863147438
+  },
+  "feasible_solution_cost": {
+    "mean": 34420.274572372036,
+    "median": 34920.49294829949,
+    "p95": 38024.72632650263
+  },
+  "all_solution_cost": {
+    "mean": 35140.63606185786,
+    "median": 35605.23467595485,
+    "p95": 37819.63863147438
+  },
+  "cost_available_instances": 500,
+  "cost_unavailable_instances": 0,
+  "pandapower_equivalence_passed": true,
+  "ramp_fraction_of_pmax": 0.25,
+  "feasibility_tolerance": 1e-05,
+  "balance_tolerance_mva": 1e-05,
+  "pgm_error_tolerance": 1e-10,
+  "pgm_feasibility_rule": "converged native AC power flow and Pg/Qg/V/angle/thermal/ramp bounds"
+}

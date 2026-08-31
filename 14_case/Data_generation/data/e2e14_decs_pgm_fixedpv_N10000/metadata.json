@@ -1,0 +1,243 @@
+{
+  "dataset_type": "decs_power_flow",
+  "case_name": "pglib_opf_case14_ieee",
+  "solver": "power_grid_model.native_batch_newton_raphson",
+  "power_grid_model_version": "1.13.154",
+  "bus_type_model": "fixed_PV_PQ",
+  "enforce_q_limits": false,
+  "pv_to_pq_switching": false,
+  "reactive_limits_role": "feasibility_check_only",
+  "pandapower_equivalence_version": "3.4.0",
+  "pandapower_equivalence": {
+    "points_requested": 16,
+    "points_converged": 16,
+    "maximum_absolute_chi_error": 5.919162671119693e-08,
+    "acceptance_max_abs_chi": 1e-06,
+    "passed": true,
+    "points": [
+      {
+        "sample_index": 0,
+        "converged": true,
+        "maximum_absolute_chi_error": 4.560479682780283e-08
+      },
+      {
+        "sample_index": 666,
+        "converged": true,
+        "maximum_absolute_chi_error": 2.835852841442943e-08
+      },
+      {
+        "sample_index": 1333,
+        "converged": true,
+        "maximum_absolute_chi_error": 3.227422884499731e-08
+      },
+      {
+        "sample_index": 1999,
+        "converged": true,
+        "maximum_absolute_chi_error": 3.490567723751781e-08
+      },
+      {
+        "sample_index": 2666,
+        "converged": true,
+        "maximum_absolute_chi_error": 5.919162671119693e-08
+      },
+      {
+        "sample_index": 3333,
+        "converged": true,
+        "maximum_absolute_chi_error": 2.6625348814590666e-08
+      },
+      {
+        "sample_index": 3999,
+        "converged": true,
+        "maximum_absolute_chi_error": 4.69369645372808e-08
+      },
+      {
+        "sample_index": 4666,
+        "converged": true,
+        "maximum_absolute_chi_error": 2.918663821738221e-08
+      },
+      {
+        "sample_index": 5332,
+        "converged": true,
+        "maximum_absolute_chi_error": 2.9381319266441608e-08
+      },
+      {
+        "sample_index": 5999,
+        "converged": true,
+        "maximum_absolute_chi_error": 2.858402559091644e-08
+      },
+      {
+        "sample_index": 6666,
+        "converged": true,
+        "maximum_absolute_chi_error": 4.058833602549328e-08
+      },
+      {
+        "sample_index": 7332,
+        "converged": true,
+        "maximum_absolute_chi_error": 5.761916632707198e-08
+      },
+      {
+        "sample_index": 7999,
+        "converged": true,
+        "maximum_absolute_chi_error": 2.3393641246372e-08
+      },
+      {
+        "sample_index": 8665,
+        "converged": true,
+        "maximum_absolute_chi_error": 5.2660365845724755e-08
+      },
+      {
+        "sample_index": 9332,
+        "converged": true,
+        "maximum_absolute_chi_error": 2.571738166867732e-08
+      },
+      {
+        "sample_index": 9999,
+        "converged": true,
+        "maximum_absolute_chi_error": 5.894546428741876e-08
+      }
+    ]
+  },
+  "n_samples": 10000,
+  "n_attempts": 10000,
+  "n_failures": 0,
+  "load_sampling": "synthetic_low_discrepancy_all_time_scale_range",
+  "load_range_extension": 0.02,
+  "load_factor_lower": 0.794,
+  "load_factor_upper": 1.106,
+  "free_variable_sampling": "symmetric_extension_of_physical_projection_bounds",
+  "free_range_extension": 0.05,
+  "pgm_error_tolerance": 1e-10,
+  "max_iterations": 30,
+  "threading": 0,
+  "batch_size": 1000,
+  "batch_size_selection": "explicit_default_1000",
+  "maximum_label_residual_pu": 8.983612133306451e-06,
+  "label_residual_acceptance_pu": 1e-05,
+  "seed": 2026,
+  "rho_order": [
+    "p_PV",
+    "V_PV_target",
+    "V_ref",
+    "p_PQ",
+    "q_PQ"
+  ],
+  "chi_order": [
+    "theta_PV",
+    "theta_PQ",
+    "V_PQ"
+  ],
+  "chi_dim": 22,
+  "pv_buses": [
+    2,
+    3,
+    6,
+    8
+  ],
+  "pq_buses": [
+    4,
+    5,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "reference_bus": 1,
+  "free_variable_lower": [
+    0.0,
+    0.94,
+    0.94,
+    0.94,
+    0.94,
+    0.94
+  ],
+  "free_variable_upper": [
+    59.0,
+    1.06,
+    1.06,
+    1.06,
+    1.06,
+    1.06
+  ],
+  "free_sampling_lower": [
+    -2.95,
+    0.9339999999999999,
+    0.9339999999999999,
+    0.9339999999999999,
+    0.9339999999999999,
+    0.9339999999999999
+  ],
+  "free_sampling_upper": [
+    61.95,
+    1.066,
+    1.066,
+    1.066,
+    1.066,
+    1.066
+  ],
+  "source_base_data": "D:\\desk\\TBSI\\2026_8_generative_SMPC\\code\\14_case\\Data_generation\\data\\e2e14_N5000_S20_T16",
+  "source_base_usage": "all_time_load_range_only",
+  "source_base_metadata": {
+    "dataset_type": "smpc_base",
+    "case_name": "pglib_opf_case14_ieee",
+    "n_bus": 14,
+    "n_gen": 5,
+    "active_generators": [
+      1,
+      2
+    ],
+    "n_instances": 5000,
+    "n_scenarios": 20,
+    "horizon": 16,
+    "forecast_deviation": 0.1,
+    "load_scale_min": 0.8,
+    "load_scale_max": 1.1,
+    "rho": 0.82,
+    "seed": 2026,
+    "first_stage_ramp": false,
+    "recourse_ramp": true,
+    "load_buses": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14
+    ],
+    "load_channels": [
+      "P_net",
+      "Q_net"
+    ],
+    "pooling_order": [
+      "minimum",
+      "mean",
+      "maximum"
+    ],
+    "split": {
+      "ratio": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "seed": 2027,
+      "counts": {
+        "train": 4000,
+        "validation": 500,
+        "test": 500
+      }
+    },
+    "feasibility_strategy": {
+      "method": "conservative asymmetric load-range sampling",
+      "solver_called_during_generation": false,
+      "formally_certified": false,
+      "note": "Feasibility is evaluated by the downstream training/test pipeline."
+    }
+  }
+}

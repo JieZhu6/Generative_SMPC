@@ -1,0 +1,64 @@
+{
+  "constraint_metrics": {
+    "validation": {
+      "pg": {
+        "n_constraint_values": 2000,
+        "mae_normalized_residual": 0.0008159766346216202,
+        "p95_abs_normalized_residual_error": 0.0021288916468620287,
+        "decision_agreement_percent": 100.0,
+        "false_feasible_percent": 0.0,
+        "false_infeasible_percent": 0.0,
+        "target_violation_percent": 0.0
+      },
+      "qg": {
+        "n_constraint_values": 10000,
+        "mae_normalized_residual": 0.0029712388062162064,
+        "p95_abs_normalized_residual_error": 0.009394440054893484,
+        "decision_agreement_percent": 99.92,
+        "false_feasible_percent": 0.06999999999999999,
+        "false_infeasible_percent": 0.01,
+        "target_violation_percent": 34.5
+      },
+      "voltage": {
+        "n_constraint_values": 18000,
+        "mae_normalized_residual": 0.0005462378086516158,
+        "p95_abs_normalized_residual_error": 0.0014325290918350212,
+        "decision_agreement_percent": 99.97222222222221,
+        "false_feasible_percent": 0.0,
+        "false_infeasible_percent": 0.027777777777777776,
+        "target_violation_percent": 4.1000000000000005
+      },
+      "angle": {
+        "n_constraint_values": 40000,
+        "mae_normalized_residual": 7.767531126737595e-05,
+        "p95_abs_normalized_residual_error": 0.0002523064613342285,
+        "decision_agreement_percent": 100.0,
+        "false_feasible_percent": 0.0,
+        "false_infeasible_percent": 0.0,
+        "target_violation_percent": 0.0
+      },
+      "thermal": {
+        "n_constraint_values": 40000,
+        "mae_normalized_residual": 0.00027220706045627595,
+        "p95_abs_normalized_residual_error": 0.0008187323808670041,
+        "decision_agreement_percent": 100.0,
+        "false_feasible_percent": 0.0,
+        "false_infeasible_percent": 0.0,
+        "target_violation_percent": 0.0
+      }
+    }
+  },
+  "protocol": {
+    "residual_definition": "normalized signed residual; <= tolerance is feasible",
+    "decision_tolerance": 0.0001,
+    "boundary_plot_window": 0.3,
+    "evaluated_inequality_blocks": {
+      "pg": "reference-generator active-power limits",
+      "qg": "generator reactive-power limits",
+      "voltage": "PQ-bus voltage-magnitude limits",
+      "angle": "branch angle-difference limits",
+      "thermal": "both-end branch apparent-power limits"
+    },
+    "seed": 2026
+  }
+}

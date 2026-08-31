@@ -1,0 +1,2 @@
+instance_index,solver_solved,feasible,termination,retries,ipopt_objective,best_cost,ipopt_max_constraint_violation,solve_seconds,total_seconds
+6,1,1,optimal,0,290796.76147782797,290796.76147782797,2.6140926960849242e-06,2.2667116000084206,2.2667116000084206
