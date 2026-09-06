@@ -302,7 +302,3 @@ If you use this repository, please cite the manuscript. Replace the entry below 
   note    = {Manuscript},
 }
 ```
-
-## Contact
-
-For questions about the paper or implementation, please open a GitHub issue or contact Yinliang Xu at `xu.yinliang@sz.tsinghua.edu.cn`.
