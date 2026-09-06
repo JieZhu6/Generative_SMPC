@@ -1,8 +1,9 @@
-"""Native batched AC power flow for the local PGLib IEEE-118 case.
+"""Batched fixed-PV AC power flow for the local PGLib IEEE-118 case.
 
-PGM ``voltage_regulator`` components enforce PV-voltage setpoints and generator
-reactive-power limits inside one native Newton-Raphson batch solve.  No
-Python-side reactive-power correction is used here.
+A vectorized full-Newton solve recovers the fixed-PV high-voltage states and
+unconstrained PV-generator reactive powers. PGM then evaluates all points in
+one native PQ batch. Native results are retained when they match that branch;
+native failures or different branches use the fixed-PV states.
 """
 
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from importlib.metadata import version
 from time import perf_counter
 
 import numpy as np
+import torch
 from power_grid_model import (
     CalculationMethod,
     CalculationType,
@@ -25,39 +27,6 @@ from Data_generation.case118_pglib import Case118
 
 
 W_PER_MW = 1.0e6
-NATIVE_VOLTAGE_REGULATOR_MIN_VERSION = "1.13.154"
-
-
-def _native_voltage_regulator_component():
-    """Return the native regulator component or raise an actionable error."""
-    installed = version("power-grid-model")
-    component = getattr(ComponentType, "voltage_regulator", None)
-    message = (
-        "Native PGM voltage_regulator support is "
-        f"required. Installed power-grid-model={installed}; version "
-        f">={NATIVE_VOLTAGE_REGULATOR_MIN_VERSION} is required. "
-        "Please upgrade power-grid-model."
-    )
-    installed_release = tuple(int(part) for part in installed.split(".")[:3])
-    required_release = tuple(
-        int(part) for part in NATIVE_VOLTAGE_REGULATOR_MIN_VERSION.split(".")
-    )
-    if installed_release < required_release or component is None:
-        raise RuntimeError(message)
-
-    required_fields = {
-        DatasetType.input: {"id", "regulated_object", "status", "u_ref", "q_min", "q_max"},
-        DatasetType.update: {"id", "u_ref"},
-        DatasetType.sym_output: {"id", "energized", "limit_violated"},
-    }
-    try:
-        for dataset_type, fields in required_fields.items():
-            names = set(initialize_array(dataset_type, component, 0).dtype.names or ())
-            if not fields.issubset(names):
-                raise RuntimeError(message)
-    except (KeyError, TypeError, ValueError) as error:
-        raise RuntimeError(message) from error
-    return component
 
 
 @dataclass(frozen=True)
@@ -69,8 +38,6 @@ class PGMCase:
     branch_ids: np.ndarray
     load_ids: np.ndarray
     generator_ids: np.ndarray
-    voltage_regulator_ids: np.ndarray
-    voltage_regulator_component: object
     source_id: int
     nonreference_generators: np.ndarray
     nonreference_generator_buses: np.ndarray
@@ -85,15 +52,13 @@ def build_pgm_case(
     ``generic_branch`` is used for every MATPOWER branch so that line charging,
     off-nominal tap ratios, and phase shifts follow the same PI model.
 
-    This builder always uses the fixed-PV formulation shared by data
-    generation, neural training, IPOPT comparison, and final evaluation.
-    Reactive limits remain feasibility inequalities; they do not change a PV
-    bus into a PQ bus during the power-flow solve.
+    Generators are represented as PQ injections.  :func:`solve_pv_batch`
+    computes their unconstrained reactive powers so that the requested PV
+    voltage magnitudes hold.  Reactive limits remain post-solve feasibility
+    inequalities and never trigger PV-to-PQ switching.
     """
     if source_short_circuit_mva <= 0:
         raise ValueError("source_short_circuit_mva must be positive")
-    regulator_component = _native_voltage_regulator_component()
-
     node_ids = case.bus[:, 0].astype(np.int32)
     nodes = initialize_array(DatasetType.input, ComponentType.node, case.n_bus)
     nodes["id"] = node_ids
@@ -145,24 +110,8 @@ def build_pgm_case(
     generators["status"] = 1
     generators["type"] = LoadGenType.const_power
     generators["p_specified"] = case.gen[nonreference, 1] * W_PER_MW
-    # Required by sym_gen input schema, but native regulators determine Q.
+    # This value is replaced by the fixed-PV batch solve before evaluation.
     generators["q_specified"] = case.gen[nonreference, 2] * W_PER_MW
-
-    voltage_regulator_ids = np.arange(
-        60_000, 60_000 + len(nonreference), dtype=np.int32,
-    )
-    voltage_regulators = initialize_array(
-        DatasetType.input, regulator_component, len(nonreference),
-    )
-    voltage_regulators["id"] = voltage_regulator_ids
-    voltage_regulators["regulated_object"] = generator_ids
-    voltage_regulators["status"] = 1
-    voltage_regulators["u_ref"] = case.bus[nonreference_buses, 7]
-    # PGM requires finite regulator limits. A deliberately inactive numerical
-    # range preserves PV voltage control; the physical Q limits are checked on
-    # the solved qg values by the common feasibility evaluator.
-    voltage_regulators["q_min"] = -1.0e6 * W_PER_MW
-    voltage_regulators["q_max"] = 1.0e6 * W_PER_MW
 
     source_id = 40_000
     source = initialize_array(DatasetType.input, ComponentType.source, 1)
@@ -180,7 +129,6 @@ def build_pgm_case(
         ComponentType.generic_branch: branches,
         ComponentType.sym_load: loads,
         ComponentType.sym_gen: generators,
-        regulator_component: voltage_regulators,
         ComponentType.source: source,
     }
     shunt_buses = np.flatnonzero((case.bus[:, 4] != 0.0) | (case.bus[:, 5] != 0.0))
@@ -206,8 +154,6 @@ def build_pgm_case(
         branch_ids=branch_ids,
         load_ids=load_ids,
         generator_ids=generator_ids,
-        voltage_regulator_ids=voltage_regulator_ids,
-        voltage_regulator_component=regulator_component,
         source_id=source_id,
         nonreference_generators=nonreference,
         nonreference_generator_buses=nonreference_buses,
@@ -219,8 +165,9 @@ def _batch_updates(
     case: Case118,
     loads_mva: np.ndarray,
     controls: np.ndarray,
+    q_nonreference_mvar: np.ndarray,
 ) -> dict:
-    """Create dense PGM update arrays for one batch of operating points."""
+    """Create dense PGM PQ updates using fixed-PV reactive-power solutions."""
     batch = len(loads_mva)
     load_update = initialize_array(
         DatasetType.update, ComponentType.sym_load, (batch, len(pgm_case.load_ids)),
@@ -246,15 +193,9 @@ def _batch_updates(
     for control_index, generator in enumerate(case.nonreference_active_generators):
         p_nonreference[:, active_position[int(generator)]] = controls[:, control_index]
     gen_update["p_specified"] = p_nonreference * W_PER_MW
-
-    regulator_update = initialize_array(
-        DatasetType.update,
-        pgm_case.voltage_regulator_component,
-        (batch, len(pgm_case.voltage_regulator_ids)),
-    )
-    regulator_update["id"] = pgm_case.voltage_regulator_ids
-    voltage_start = len(case.nonreference_active_generators)
-    regulator_update["u_ref"] = controls[:, voltage_start:-1]
+    if q_nonreference_mvar.shape != (batch, len(pgm_case.generator_ids)):
+        raise ValueError("q_nonreference_mvar has an invalid shape")
+    gen_update["q_specified"] = q_nonreference_mvar * W_PER_MW
 
     source_update = initialize_array(
         DatasetType.update, ComponentType.source, (batch, 1),
@@ -266,8 +207,234 @@ def _batch_updates(
     return {
         ComponentType.sym_load: load_update,
         ComponentType.sym_gen: gen_update,
-        pgm_case.voltage_regulator_component: regulator_update,
         ComponentType.source: source_update,
+    }
+
+
+def _fixed_pv_newton_chunk(
+    case: Case118,
+    loads_mva: np.ndarray,
+    controls: np.ndarray,
+    *,
+    tolerance: float,
+    max_iterations: int,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    """Solve one chunk of fixed-PV equations with a full float64 AC Jacobian.
+
+    Parameters
+    ----------
+    case : Case118
+        MATPOWER network and bus partitions.
+    loads_mva : ndarray, shape (B,n_load,2)
+        Active/reactive loads in MW/Mvar.
+    controls : ndarray, shape (B,free_dim)
+        ``[Pg_nonref,V_PV,V_ref]`` controls.
+    tolerance : float
+        Maximum P/Q mismatch in per unit.
+    max_iterations : int
+        Maximum full-Newton iterations.
+    device : torch.device
+        CPU or CUDA device used for batched dense linear solves.
+
+    Returns
+    -------
+    vm, va, qg_nonreference, errors, iterations
+        Solved voltages, unconstrained PV-generator Q in Mvar, final per-point
+        mismatches, and the number of iterations used.
+    """
+    real = torch.float64
+    loads = torch.tensor(loads_mva, dtype=real, device=device)
+    control = torch.tensor(controls, dtype=real, device=device)
+    ybus = torch.as_tensor(case.ybus, dtype=torch.complex128, device=device)
+    gmat, bmat = ybus.real, ybus.imag
+    pv = torch.as_tensor(case.pv_buses, dtype=torch.long, device=device)
+    pq = torch.as_tensor(case.pq_buses, dtype=torch.long, device=device)
+    nonreference_buses = torch.cat((pv, pq))
+    load_buses = torch.as_tensor(case.load_buses, dtype=torch.long, device=device)
+    generator_buses = torch.as_tensor(
+        case.generator_buses, dtype=torch.long, device=device,
+    )
+    active_generators = torch.as_tensor(
+        case.nonreference_active_generators, dtype=torch.long, device=device,
+    )
+    voltage_buses = torch.as_tensor(
+        case.voltage_control_buses, dtype=torch.long, device=device,
+    )
+    nonreference_generators = torch.as_tensor(
+        np.flatnonzero(np.arange(case.n_gen) != case.reference_generator),
+        dtype=torch.long,
+        device=device,
+    )
+
+    batch = len(loads_mva)
+    pd = torch.zeros((batch, case.n_bus), dtype=real, device=device)
+    qd = torch.zeros_like(pd)
+    pd[:, load_buses] = loads[..., 0]
+    qd[:, load_buses] = loads[..., 1]
+    pg = torch.as_tensor(case.gen[:, 9], dtype=real, device=device)
+    pg = pg.expand(batch, -1).clone()
+    active_count = len(case.nonreference_active_generators)
+    pg[:, active_generators] = control[:, :active_count]
+    p_generation = torch.zeros_like(pd)
+    p_generation.index_add_(1, generator_buses, pg)
+    p_specified = (p_generation - pd) / case.base_mva
+    q_specified = -qd / case.base_mva
+
+    vm = torch.ones_like(pd)
+    va = torch.zeros_like(pd)
+    vm[:, voltage_buses] = control[:, active_count:]
+    diagonal = torch.arange(case.n_bus, device=device)
+    n_angle, n_pq = len(nonreference_buses), len(pq)
+    errors = torch.full((batch,), torch.inf, dtype=real, device=device)
+
+    for iteration in range(1, max_iterations + 1):
+        voltage = torch.polar(vm, va)
+        injection = voltage * torch.conj(voltage @ ybus.T)
+        active_mismatch = (
+            p_specified[:, nonreference_buses]
+            - injection.real[:, nonreference_buses]
+        )
+        reactive_mismatch = (
+            q_specified[:, pq] - injection.imag[:, pq]
+        )
+        errors = torch.maximum(
+            active_mismatch.abs().amax(dim=1),
+            reactive_mismatch.abs().amax(dim=1),
+        )
+        unconverged = torch.where(errors > tolerance)[0]
+        if len(unconverged) == 0:
+            break
+
+        vm_active, va_active = vm[unconverged], va[unconverged]
+        angle = va_active[:, :, None] - va_active[:, None, :]
+        cosine, sine = torch.cos(angle), torch.sin(angle)
+        voltage_product = vm_active[:, :, None] * vm_active[:, None, :]
+        h = voltage_product * (gmat * sine - bmat * cosine)
+        n = vm_active[:, :, None] * (gmat * cosine + bmat * sine)
+        m = -voltage_product * (gmat * cosine + bmat * sine)
+        ell = vm_active[:, :, None] * (gmat * sine - bmat * cosine)
+        h[:, diagonal, diagonal] = (
+            -injection.imag[unconverged] - torch.diag(bmat) * vm_active**2
+        )
+        n[:, diagonal, diagonal] = (
+            injection.real[unconverged] / vm_active
+            + torch.diag(gmat) * vm_active
+        )
+        m[:, diagonal, diagonal] = (
+            injection.real[unconverged] - torch.diag(gmat) * vm_active**2
+        )
+        ell[:, diagonal, diagonal] = (
+            injection.imag[unconverged] / vm_active
+            - torch.diag(bmat) * vm_active
+        )
+        top = torch.cat((
+            h[:, nonreference_buses][:, :, nonreference_buses],
+            n[:, nonreference_buses][:, :, pq],
+        ), dim=2)
+        bottom = torch.cat((
+            m[:, pq][:, :, nonreference_buses],
+            ell[:, pq][:, :, pq],
+        ), dim=2)
+        jacobian = torch.cat((top, bottom), dim=1)
+        mismatch = torch.cat((
+            active_mismatch[unconverged], reactive_mismatch[unconverged],
+        ), dim=1)
+        step = torch.linalg.solve(jacobian, mismatch[..., None])[..., 0]
+        va[unconverged[:, None], nonreference_buses] += step[:, :n_angle]
+        vm[unconverged[:, None], pq] += step[:, n_angle:n_angle + n_pq]
+
+    voltage = torch.polar(vm, va)
+    injection = voltage * torch.conj(voltage @ ybus.T) * case.base_mva
+    qg = qd[:, generator_buses] + injection.imag[:, generator_buses]
+    result = (
+        vm.detach().cpu().numpy(),
+        va.detach().cpu().numpy(),
+        qg[:, nonreference_generators].detach().cpu().numpy(),
+        errors.detach().cpu().numpy(),
+        iteration,
+    )
+    return result
+
+
+def _fixed_pv_reactive_power_batch(
+    case: Case118,
+    loads_mva: np.ndarray,
+    controls: np.ndarray,
+    *,
+    tolerance: float,
+    max_iterations: int,
+    chunk_size: int,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, float]:
+    """Solve fixed-PV states and Q for an arbitrarily large batch.
+
+    Parameters are identical to :func:`_fixed_pv_newton_chunk`; ``chunk_size``
+    limits the number of dense Jacobians resident in memory.
+    """
+    batch = len(loads_mva)
+    nonreference_count = case.n_gen - 1
+    vm = np.full((batch, case.n_bus), np.nan)
+    va = np.full_like(vm, np.nan)
+    qg = np.full((batch, nonreference_count), np.nan)
+    errors = np.full(batch, np.inf)
+    maximum_iterations = 0
+    start_time = perf_counter()
+    for start in range(0, batch, chunk_size):
+        stop = min(start + chunk_size, batch)
+        vm_chunk, va_chunk, q_chunk, error_chunk, iterations = _fixed_pv_newton_chunk(
+            case,
+            loads_mva[start:stop],
+            controls[start:stop],
+            tolerance=tolerance,
+            max_iterations=max_iterations,
+            device=device,
+        )
+        vm[start:stop] = vm_chunk
+        va[start:stop] = va_chunk
+        qg[start:stop] = q_chunk
+        errors[start:stop] = error_chunk
+        maximum_iterations = max(maximum_iterations, iterations)
+    return vm, va, qg, errors, maximum_iterations, perf_counter() - start_time
+
+
+def _states_from_fixed_pv_voltage(
+    case: Case118,
+    loads_mva: np.ndarray,
+    controls: np.ndarray,
+    vm: np.ndarray,
+    va: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Recover generator and branch states with pandapower conventions."""
+    batch = len(loads_mva)
+    voltage = vm * np.exp(1j * va)
+    injection = voltage * np.conj(voltage @ case.ybus.T) * case.base_mva
+    pd = np.zeros((batch, case.n_bus))
+    qd = np.zeros_like(pd)
+    pd[:, case.load_buses] = loads_mva[..., 0]
+    qd[:, case.load_buses] = loads_mva[..., 1]
+
+    pg = np.broadcast_to(case.gen[:, 9], (batch, case.n_gen)).copy()
+    active_count = len(case.nonreference_active_generators)
+    pg[:, case.nonreference_active_generators] = controls[:, :active_count]
+    pg[:, case.reference_generator] = (
+        pd[:, case.reference_bus] + injection.real[:, case.reference_bus]
+    )
+    qg = qd[:, case.generator_buses] + injection.imag[:, case.generator_buses]
+
+    fbus = case.branch[:, 0].astype(int) - 1
+    tbus = case.branch[:, 1].astype(int) - 1
+    current_from = case.yff[None] * voltage[:, fbus] + case.yft[None] * voltage[:, tbus]
+    current_to = case.ytf[None] * voltage[:, fbus] + case.ytt[None] * voltage[:, tbus]
+    power_from = voltage[:, fbus] * np.conj(current_from) * case.base_mva
+    power_to = voltage[:, tbus] * np.conj(current_to) * case.base_mva
+    return {
+        "pg": pg,
+        "qg": qg,
+        "pf": power_from.real,
+        "qf": power_from.imag,
+        "pt": power_to.real,
+        "qt": power_to.imag,
     }
 
 
@@ -281,8 +448,10 @@ def solve_pv_batch(
     pgm_max_iterations: int = 30,
     threading: int = -1,
     continue_on_batch_error: bool = False,
+    fixed_pv_chunk_size: int = 1024,
+    fixed_pv_device: str = "auto",
 ) -> dict[str, np.ndarray | int | float]:
-    """Solve many MATPOWER PV operating points in one native PGM batch.
+    """Solve fixed-PV points and cross-check them in one native PGM batch.
 
     Parameters
     ----------
@@ -290,6 +459,19 @@ def solve_pv_batch(
         Active/reactive loads in MW/Mvar.
     controls : ndarray, shape (B, free_dim)
         ``[Pg_nonref, V_PV..., V_ref]`` controls used by the neural model.
+    pgm_error_tolerance : float, default=1e-10
+        Positive per-unit mismatch tolerance for both Newton solves.
+    pgm_max_iterations : int, default=30
+        Positive iteration limit for both Newton solves.
+    threading : int, default=-1
+        Native PGM batch worker count; negative means sequential.
+    continue_on_batch_error : bool, default=False
+        Whether points that fail the fixed-PV Newton stage may remain in the
+        returned batch. Native PGM partial errors are always collected.
+    fixed_pv_chunk_size : int, default=1024
+        Maximum number of dense fixed-PV Jacobians solved simultaneously.
+    fixed_pv_device : {"auto","cpu","cuda"}, default="auto"
+        Torch device for the vectorized fixed-PV Newton stage.
     """
     total_start = perf_counter()
     loads_mva = np.asarray(loads_mva, dtype=float)
@@ -302,8 +484,40 @@ def solve_pv_batch(
         raise ValueError("controls must have shape (B, free_dim)")
     if pgm_error_tolerance <= 0 or pgm_max_iterations < 1:
         raise ValueError("invalid PGM Newton-Raphson settings")
-    _native_voltage_regulator_component()
-    update_data = _batch_updates(pgm_case, case, loads_mva, controls)
+    if fixed_pv_chunk_size < 1:
+        raise ValueError("fixed_pv_chunk_size must be positive")
+    if fixed_pv_device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("fixed_pv_device must be auto, cpu, or cuda")
+    if fixed_pv_device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested for fixed-PV Newton but is unavailable")
+    device = torch.device(
+        "cuda" if fixed_pv_device == "auto" and torch.cuda.is_available()
+        else "cpu" if fixed_pv_device == "auto" else fixed_pv_device
+    )
+    fixed_pv_tolerance = min(pgm_error_tolerance, 1.0e-10)
+    fixed_vm, fixed_va, q_nonreference, fixed_pv_errors, fixed_pv_iterations, fixed_pv_seconds = (
+        _fixed_pv_reactive_power_batch(
+            case,
+            loads_mva,
+            controls,
+            tolerance=fixed_pv_tolerance,
+            max_iterations=pgm_max_iterations,
+            chunk_size=fixed_pv_chunk_size,
+            device=device,
+        )
+    )
+    fixed_pv_success = np.isfinite(fixed_pv_errors) & (
+        fixed_pv_errors <= fixed_pv_tolerance
+    )
+    if not np.all(fixed_pv_success) and not continue_on_batch_error:
+        failed = np.flatnonzero(~fixed_pv_success)
+        raise RuntimeError(
+            "fixed-PV Newton failed for "
+            f"{len(failed)}/{batch} points; first failed indices={failed[:10].tolist()}"
+        )
+    update_data = _batch_updates(
+        pgm_case, case, loads_mva, controls, q_nonreference,
+    )
     prepare_seconds = perf_counter() - total_start
 
     power_flow_start = perf_counter()
@@ -315,7 +529,7 @@ def solve_pv_batch(
             calculation_method=CalculationMethod.newton_raphson,
             update_data=update_data,
             threading=threading,
-            continue_on_batch_error=continue_on_batch_error,
+            continue_on_batch_error=True,
             output_component_types=[
                 ComponentType.node,
                 ComponentType.generic_branch,
@@ -327,14 +541,14 @@ def solve_pv_batch(
         raise RuntimeError(
             "Native PGM batch calculation failed in power-grid-model "
             f"{version('power-grid-model')} for batch_size={batch}. "
-            "No Python-side reactive-power correction fallback is used."
+            "The fixed-PV Q recovery succeeded before this native PQ solve."
         ) from error
     power_flow_seconds = perf_counter() - power_flow_start
 
-    batch_success = np.ones(batch, dtype=bool)
+    native_pgm_success = np.ones(batch, dtype=bool)
     batch_error = pgm_case.model.batch_error
     if batch_error is not None:
-        batch_success[np.asarray(batch_error.failed_scenarios, dtype=int)] = False
+        native_pgm_success[np.asarray(batch_error.failed_scenarios, dtype=int)] = False
 
     extract_start = perf_counter()
     node_output = output[ComponentType.node]
@@ -342,19 +556,53 @@ def solve_pv_batch(
     gen_output = output[ComponentType.sym_gen]
     source_output = output[ComponentType.source]
 
-    pg = np.empty((batch, case.n_gen))
-    qg = np.empty_like(pg)
-    pg[:, case.reference_generator] = source_output["p"][:, 0] / W_PER_MW
-    qg[:, case.reference_generator] = source_output["q"][:, 0] / W_PER_MW
-    pg[:, pgm_case.nonreference_generators] = gen_output["p"] / W_PER_MW
-    qg[:, pgm_case.nonreference_generators] = gen_output["q"] / W_PER_MW
-
+    native_pg = np.empty((batch, case.n_gen))
+    native_qg = np.empty_like(native_pg)
+    native_pg[:, case.reference_generator] = source_output["p"][:, 0] / W_PER_MW
+    native_qg[:, case.reference_generator] = source_output["q"][:, 0] / W_PER_MW
+    native_pg[:, pgm_case.nonreference_generators] = gen_output["p"] / W_PER_MW
+    native_qg[:, pgm_case.nonreference_generators] = q_nonreference
+    native_states = {
+        "pg": native_pg,
+        "qg": native_qg,
+        "vm": np.asarray(node_output["u_pu"], dtype=float),
+        "va": np.asarray(node_output["u_angle"], dtype=float),
+        "pf": np.asarray(branch_output["p_from"], dtype=float) / W_PER_MW,
+        "qf": np.asarray(branch_output["q_from"], dtype=float) / W_PER_MW,
+        "pt": np.asarray(branch_output["p_to"], dtype=float) / W_PER_MW,
+        "qt": np.asarray(branch_output["q_to"], dtype=float) / W_PER_MW,
+    }
     target_vm = controls[:, len(case.nonreference_active_generators):-1]
-    raw_pv_error = np.abs(node_output["u_pu"][:, case.pv_buses] - target_vm)
+    diagnostic_tolerance = max(pgm_error_tolerance, 10.0 * np.finfo(float).eps)
+    native_pv_error = np.max(
+        np.abs(native_states["vm"][:, case.pv_buses] - target_vm), axis=1,
+    )
+    native_voltage = native_states["vm"] * np.exp(1j * native_states["va"])
+    fixed_voltage = fixed_vm * np.exp(1j * fixed_va)
+    native_voltage_error = np.max(np.abs(native_voltage - fixed_voltage), axis=1)
+    native_pgm_match = (
+        fixed_pv_success
+        & native_pgm_success
+        & np.isfinite(native_voltage_error)
+        & (native_voltage_error <= 1.0e-7)
+        & np.isfinite(native_pv_error)
+        & (native_pv_error <= diagnostic_tolerance)
+    )
+    native_pgm_wrong_branch = fixed_pv_success & native_pgm_success & ~native_pgm_match
+    fallback_used = fixed_pv_success & ~native_pgm_match
+
+    fixed_states = _states_from_fixed_pv_voltage(
+        case, loads_mva, controls, fixed_vm, fixed_va,
+    )
+    final_states = {"vm": fixed_vm.copy(), "va": fixed_va.copy(), **fixed_states}
+    for name in ("pg", "qg", "vm", "va", "pf", "qf", "pt", "qt"):
+        final_states[name][native_pgm_match] = native_states[name][native_pgm_match]
+
+    batch_success = fixed_pv_success
+    raw_pv_error = np.abs(final_states["vm"][:, case.pv_buses] - target_vm)
     maximum_error_by_point = np.where(
         batch_success, np.max(raw_pv_error, axis=1), np.inf,
     )
-    diagnostic_tolerance = max(pgm_error_tolerance, 10.0 * np.finfo(float).eps)
     pv_converged = batch_success & (maximum_error_by_point <= diagnostic_tolerance)
     maximum_error = (
         float(np.max(maximum_error_by_point[batch_success]))
@@ -364,19 +612,20 @@ def solve_pv_batch(
     total_seconds = perf_counter() - total_start
 
     return {
-        "pg": pg,
-        "qg": qg,
-        "vm": node_output["u_pu"],
-        "va": node_output["u_angle"],
-        "pf": branch_output["p_from"] / W_PER_MW,
-        "qf": branch_output["q_from"] / W_PER_MW,
-        "pt": branch_output["p_to"] / W_PER_MW,
-        "qt": branch_output["q_to"] / W_PER_MW,
+        **final_states,
         "pv_converged": pv_converged,
         "batch_success": batch_success,
-        "pv_iterations": 1,
+        "native_pgm_success": native_pgm_success,
+        "native_pgm_matches_fixed_pv": native_pgm_match,
+        "native_pgm_wrong_branch": native_pgm_wrong_branch,
+        "native_pgm_voltage_error_pu": native_voltage_error,
+        "fixed_pv_fallback_used": fallback_used,
+        "pv_iterations": fixed_pv_iterations,
         "pv_voltage_error_pu": raw_pv_error,
         "max_pv_voltage_error_pu": maximum_error,
+        "fixed_pv_equation_error_pu": fixed_pv_errors,
+        "fixed_pv_device": str(device),
+        "t_fixed_pv": fixed_pv_seconds,
         "t_prepare": prepare_seconds,
         "t_power_flow": power_flow_seconds,
         "t_extract": extract_seconds,

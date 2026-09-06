@@ -1,0 +1,35 @@
+{
+  "method": "shared-trajectory Pyomo/IPOPT",
+  "data_split": "test",
+  "n_instances": 200,
+  "solver_solved_instances": 200,
+  "feasible_instances": 200,
+  "feasibility_rate": 1.0,
+  "model_build_seconds": 24.488597500007018,
+  "solve_seconds": {
+    "mean": 398.01911514249923,
+    "median": 355.8906429500057,
+    "p95": 686.1912446199973
+  },
+  "total_seconds": {
+    "mean": 398.01911514249923,
+    "median": 355.8906429500057,
+    "p95": 686.1912446199973
+  },
+  "best_cost": {
+    "mean": 1541150.8617171154,
+    "median": 1570632.56090519,
+    "p95": 1654371.7622352082
+  },
+  "ipopt_max_constraint_violation": {
+    "mean": 2.522693724328843e-06,
+    "median": 2.5906101059902653e-06,
+    "p95": 2.6157058610198902e-06
+  },
+  "ramp_fraction_of_pmax": 0.25,
+  "ipopt_tolerance": 1e-08,
+  "ipopt_constraint_tolerance": 1e-08,
+  "feasibility_tolerance": 0.0001,
+  "max_case_seconds": 1800,
+  "ipopt_path": "D:\\anaconda\\envs\\py3.10\\Library\\bin\\ipopt.exe"
+}

@@ -1,0 +1,70 @@
+{
+  "constraint_metrics": {
+    "validation": {
+      "pg": {
+        "n_constraint_values": 10000,
+        "mae_normalized_residual": 0.003956063436421755,
+        "p95_abs_normalized_residual_error": 0.009921005368232703,
+        "decision_agreement_percent": 99.85000000000001,
+        "false_feasible_percent": 0.08,
+        "false_infeasible_percent": 0.06999999999999999,
+        "target_violation_percent": 33.040000000000006
+      },
+      "qg": {
+        "n_constraint_values": 540000,
+        "mae_normalized_residual": 0.008578932161495778,
+        "p95_abs_normalized_residual_error": 0.03434948921203612,
+        "decision_agreement_percent": 99.92185185185186,
+        "false_feasible_percent": 0.03777777777777778,
+        "false_infeasible_percent": 0.04037037037037037,
+        "target_violation_percent": 30.362037037037037
+      },
+      "voltage": {
+        "n_constraint_values": 640000,
+        "mae_normalized_residual": 0.0009448196992375056,
+        "p95_abs_normalized_residual_error": 0.0030159950256347656,
+        "decision_agreement_percent": 99.97953125,
+        "false_feasible_percent": 0.01,
+        "false_infeasible_percent": 0.01046875,
+        "target_violation_percent": 1.1962499999999998
+      },
+      "angle": {
+        "n_constraint_values": 1860000,
+        "mae_normalized_residual": 0.0005387261696144271,
+        "p95_abs_normalized_residual_error": 0.0016129016876220703,
+        "decision_agreement_percent": 99.99768817204301,
+        "false_feasible_percent": 0.0012365591397849461,
+        "false_infeasible_percent": 0.001075268817204301,
+        "target_violation_percent": 0.1453225806451613
+      },
+      "thermal": {
+        "n_constraint_values": 1860000,
+        "mae_normalized_residual": 0.002660620680771848,
+        "p95_abs_normalized_residual_error": 0.008134663105010986,
+        "decision_agreement_percent": 99.94048387096774,
+        "false_feasible_percent": 0.029301075268817207,
+        "false_infeasible_percent": 0.03021505376344086,
+        "target_violation_percent": 6.697473118279571
+      }
+    }
+  },
+  "protocol": {
+    "residual_definition": "normalized signed residual; <= tolerance is feasible",
+    "decision_tolerance": 0.0001,
+    "residual_plot": {
+      "scale": "symmetric_log",
+      "linear_half_width": 0.3,
+      "sampling": "equal point budget per constraint block with extrema retained",
+      "maximum_points": 20000
+    },
+    "evaluated_inequality_blocks": {
+      "pg": "reference-generator active-power limits",
+      "qg": "generator reactive-power limits",
+      "voltage": "PQ-bus voltage-magnitude limits",
+      "angle": "branch angle-difference limits",
+      "thermal": "both-end branch apparent-power limits"
+    },
+    "seed": 2026,
+    "split": "validation"
+  }
+}

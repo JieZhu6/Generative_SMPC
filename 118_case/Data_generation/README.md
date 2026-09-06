@@ -29,11 +29,11 @@ $IEEE118_PYTHON = "C:/Users/JieZhu/AppData/Roaming/uv/python/cpython-3.12.12-win
 
 ```powershell
 & $IEEE118_PYTHON Data_generation/generate_smpc_dataset.py `
-    --n-instances 10000 --n-scenarios 20 --horizon 16 `
-    --forecast-deviation 0.15 --load-scale-min 0.85 --load-scale-max 1.15
+    --n-instances 5000 --n-scenarios 20 --horizon 16 `
+    --forecast-deviation 0.15 --load-scale-min 0.8 --load-scale-max 1.1
 ```
 
-默认输出为 `Data_generation/data/e2e118_N10000_S20_T16`。基础数据包含：
+默认输出为 `Data_generation/data/e2e118_N5000_S20_T16`。基础数据包含：
 
 ```text
 current_load.npy       [N,99,2]
@@ -51,39 +51,62 @@ P/Q 使用相同节点缩放因子以保持 PGLib 基准功率因数。论文公
 
 ```powershell
 & $IEEE118_PYTHON Data_generation/generate_decs_dataset.py `
-    --base-data Data_generation/data/e2e118_N10000_S20_T16 `
-    --n-samples 50000 --batch-size 1000 --verify-points 100 `
+    --base-data Data_generation/data/e2e118_N5000_S20_T16 `
+    --solver pandapower --n-samples 50000 --batch-size 1000 `
     --load-range-extension 0.02 --free-range-extension 0.05
 ```
 
 默认输出为
-`Data_generation/data/e2e118_decs_pgm_fixedpv_N50000`。PGM 负责批量固定 PV
-潮流，确定性抽样点由 pandapower 交叉验证。Qg 越界只参与后续不等式可行性
-判断，不触发 PV 到 PQ 切换。
+`Data_generation/data/e2e118_decs_pandapower_N50000`。默认的 pandapower 后端
+逐点求解固定 PV 潮流，优先用上一个收敛结果热启动，失败后自动用平启动
+重试。`--batch-size` 在该模式下只控制采样和进度分块，潮流仍逐点计算。
+
+如需使用支持原生批处理的 PGM，可改为：
+
+```powershell
+& $IEEE118_PYTHON Data_generation/generate_decs_dataset.py `
+    --solver pgm --n-samples 50000 --batch-size 1000 --verify-points 100
+```
+
+PGM 输出目录默认为 `Data_generation/data/e2e118_decs_pgm_N50000`，并用
+pandapower 对确定性抽样点交叉验证。两个后端保存完全相同的数组、划分和
+归一化文件。Qg 越界只参与后续不等式可行性判断，不触发 PV 到 PQ 切换。
+生成器默认要求所有 PQ 节点电压不低于
+`0.7 p.u.`，用于剔除 Newton 法偶尔收敛到的非目标低电压数学解支路；阈值可
+通过 `--minimum-pq-voltage` 调整，并写入数据元数据。
 
 ## 3. 训练 DECS
 
 ```powershell
 & $IEEE118_PYTHON Neural_network/train_decs.py `
-    --data Data_generation/data/e2e118_decs_pgm_fixedpv_N50000 `
-    --hidden-dims 256 256 --lambda-physics 1.0 --patience 50
+    --data Data_generation/data/e2e118_decs_pandapower_N50000 `
+    --hidden-dims 256 256 --epochs 700 --batch-size 1024 `
+    --learning-rate 1e-3 --lambda-physics 3 `
+    --lr-scheduler plateau --lr-decay-factor 0.3 `
+    --lr-decay-patience 10 --lr-min-delta 1e-5 `
+    --min-learning-rate 1e-5 --patience 80
 ```
 
 训练损失为标准化监督 MSE 与 AC 功率平衡残差 MSE 之和。早停只使用验证
-集；测试集在最佳 checkpoint 选定后评估一次。
+集；测试集在最佳 checkpoint 选定后评估一次。上述参数是固定 PV 的
+IEEE-118 对比实验中综合状态误差、潮流残差和约束漏检率最优的默认配置。
+标准输出文件仍为 `Neural_network/decs_pgm_fixedpv.pt`，以兼容生成器、TCN
+和已有验证程序。
 
 ## 4. 训练生成器与基准模型
 
 ```powershell
 & $IEEE118_PYTHON Neural_network/train_generator.py `
-    --data Data_generation/data/e2e118_N10000_S20_T16 `
+    --data Data_generation/data/e2e118_N5000_S20_T16 `
     --decs Neural_network/decs_pgm_fixedpv.pt
 ```
 
 IEEE-118 在论文默认 `K=50,S=20,T=16` 下，每个外部训练样本会展开为
 16,000 个 AC 运行点，因此 CSNG 默认 micro-batch 为 1，并通过 8 步梯度
-累积得到有效 batch 8。默认生成器容量为 256 个隐藏通道、32 维潜变量和
-64 维潜嵌入；可行性阶段为 40 轮，经济目标 warmup 为 20 轮。多样性核使用
+累积得到有效 batch 8。默认生成器容量为 64 个隐藏通道、16 维潜变量和
+32 维潜嵌入；可行性阶段为 60 轮，经济目标 warmup 为 30 轮。正式训练采用
+`lambda_fea=0.01`、`lambda_eco=0.005` 和更关注最差约束的
+`alpha_c=rho_c=0.05`。多样性核使用
 归一化轨迹的维度均方距离，使 `sigma_div=0.5` 不随控制维数失效。确定性
 TCN、S-CSNG 和 WD-CSNG 使用各自入口，但共享同一 118 节点数据和 DECS；
 确定性模型的目标成本尺度默认由最多 128 个训练样本自动冻结。
@@ -99,7 +122,7 @@ TCN、S-CSNG 和 WD-CSNG 使用各自入口，但共享同一 118 节点数据�
 
 & $IEEE118_PYTHON Data_generation/generate_decs_dataset.py `
     --base-data Data_generation/data/e2e118_smoke `
-    --n-samples 16 --batch-size 8 --verify-points 2 `
+    --solver pandapower --n-samples 16 --batch-size 8 `
     --output Data_generation/data/e2e118_decs_smoke
 ```
 

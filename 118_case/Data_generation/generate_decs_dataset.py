@@ -1,11 +1,13 @@
-"""Generate fixed-PV IEEE-118 DECS labels with native PGM batches.
+"""Generate fixed-PV IEEE-118 DECS labels with pandapower or native PGM.
 
-Every operating point is synthesized directly. Loads are sampled over the
-base SMPC generator's complete all-time scale range, enlarged slightly on both
-sides by ``--load-range-extension``. Free neural controls are sampled over
-their physical projection bounds with a small symmetric extension controlled
-by ``--free-range-extension``. PGM solves fixed-PV AC power flow in batches
-and a small deterministic subset is cross-checked with pandapower.
+Every operating point is synthesized directly. Loads are sampled with a
+scrambled Halton sequence over the base SMPC generator's complete all-time
+scale range, enlarged slightly on both sides by ``--load-range-extension``.
+Free neural controls are sampled independently and uniformly over the same
+physical bounds used by generator training, with a small symmetric extension
+controlled by ``--free-range-extension``. Pandapower is the default label
+solver for robust Newton convergence; PGM remains available for native batch
+generation. Both backends retain only the normal high-voltage solution branch.
 """
 
 import argparse
@@ -26,7 +28,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from Data_generation.case118_pglib import Case118, load_case118  # noqa: E402
 from Neural_network.decs import ACReconstruction  # noqa: E402
-from pgm_batch_power_flow import build_pgm_case, solve_pv_batch  # noqa: E402
 
 
 LABEL_RESIDUAL_TOLERANCE_PU = 1.0e-4
@@ -79,35 +80,60 @@ def solve_power_flow(
     u: np.ndarray,
     tolerance_mva: float,
     max_iterations: int,
+    warm_start: bool = False,
 ) -> np.ndarray | None:
-    """Solve one fixed-PV pandapower PF and return its dependent-state label."""
+    """Solve one fixed-PV pandapower PF and return its dependent-state label.
+
+    Parameters
+    ----------
+    net : pandapowerNet
+        Reusable IEEE-118 network updated in place.
+    case : Case118
+        Network topology and fixed PV/PQ bus partition.
+    load : np.ndarray, shape (n_load_buses,2)
+        Active/reactive loads in MW/Mvar.
+    u : np.ndarray, shape (free_dim,)
+        ``[Pg_nonref,V_PV,V_ref]`` controls in MW and p.u.
+    tolerance_mva : float
+        Positive Newton nodal-mismatch tolerance in MVA.
+    max_iterations : int
+        Maximum Newton iterations per initialization.
+    warm_start : bool, default=False
+        Try the previous converged result before a flat start.
+    """
     import pandapower as pp
 
     assign_operating_point(net, case, load, u)
-    try:
-        pp.runpp(
-            net,
-            algorithm="nr",
-            calculate_voltage_angles=True,
-            init="flat",
-            max_iteration=max_iterations,
-            tolerance_mva=tolerance_mva,
-            enforce_q_lims=False,
-            voltage_depend_loads=False,
-            check_connectivity=True,
-            numba=True,
-        )
-    except Exception:
-        return None
-    if not net.converged:
-        return None
-    bus_ids = case.bus[:, 0].astype(int)
-    vm = net.res_bus.loc[bus_ids, "vm_pu"].to_numpy(dtype=float)
-    va = np.deg2rad(net.res_bus.loc[bus_ids, "va_degree"].to_numpy(dtype=float))
-    return np.r_[va[case.pv_buses], va[case.pq_buses], vm[case.pq_buses]]
+    initializations = ("results", "flat") if warm_start else ("flat",)
+    for initialization in initializations:
+        try:
+            pp.runpp(
+                net,
+                algorithm="nr",
+                calculate_voltage_angles=True,
+                init=initialization,
+                max_iteration=max_iterations,
+                tolerance_mva=tolerance_mva,
+                enforce_q_lims=False,
+                voltage_depend_loads=False,
+                check_connectivity=True,
+                numba=True,
+            )
+        except Exception:
+            continue
+        if net.converged:
+            bus_ids = case.bus[:, 0].astype(int)
+            vm = net.res_bus.loc[bus_ids, "vm_pu"].to_numpy(dtype=float)
+            va = np.deg2rad(
+                net.res_bus.loc[bus_ids, "va_degree"].to_numpy(dtype=float)
+            )
+            return np.r_[
+                va[case.pv_buses], va[case.pq_buses], vm[case.pq_buses],
+            ]
+    return None
 
 
-def solve_power_flow_batch(
+def solve_power_flow_batch_pgm(
     pgm_case,
     case: Case118,
     load: np.ndarray,
@@ -117,6 +143,8 @@ def solve_power_flow_batch(
     threading: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Solve one native fixed-PV PGM batch and return dependent-state labels."""
+    from pgm_batch_power_flow import solve_pv_batch
+
     states = solve_pv_batch(
         pgm_case,
         case,
@@ -142,6 +170,51 @@ def solve_power_flow_batch(
     return chi, converged
 
 
+def solve_power_flow_batch_pandapower(
+    net,
+    case: Case118,
+    load: np.ndarray,
+    u: np.ndarray,
+    tolerance_mva: float,
+    max_iterations: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve sampled points sequentially with pandapower and warm-start fallback.
+
+    Parameters
+    ----------
+    net : pandapowerNet
+        Reusable IEEE-118 network whose last converged result seeds the next point.
+    case : Case118
+        Network topology and fixed PV/PQ bus partition.
+    load : np.ndarray, shape (batch,n_load_buses,2)
+        Active/reactive loads in MW/Mvar.
+    u : np.ndarray, shape (batch,free_dim)
+        ``[Pg_nonref,V_PV,V_ref]`` controls in MW and p.u.
+    tolerance_mva : float
+        Positive Newton nodal-mismatch tolerance in MVA.
+    max_iterations : int
+        Maximum Newton iterations for warm and flat initialization.
+    """
+    n_angle = len(case.pv_buses) + len(case.pq_buses)
+    chi = np.full((len(load), n_angle + len(case.pq_buses)), np.nan)
+    converged = np.zeros(len(load), dtype=bool)
+    warm_start_available = False
+    for index in range(len(load)):
+        label = solve_power_flow(
+            net, case, load[index], u[index], tolerance_mva, max_iterations,
+            warm_start=warm_start_available,
+        )
+        if label is not None:
+            chi[index] = label
+            converged[index] = True
+            warm_start_available = True
+        else:
+            # A failed Newton attempt can overwrite ``res_bus`` with its last
+            # iterate, so the following point must restart from a flat profile.
+            warm_start_available = False
+    return chi, converged
+
+
 def compare_labels_with_pandapower(
     case: Case118,
     load: np.ndarray,
@@ -153,7 +226,12 @@ def compare_labels_with_pandapower(
 ) -> dict:
     """Cross-check fixed-PV PGM labels against fixed-PV pandapower."""
     if point_count <= 0:
-        return {"points_requested": 0, "points_converged": 0, "passed": None}
+        return {
+            "points_requested": 0,
+            "points_converged": 0,
+            "maximum_absolute_chi_error": None,
+            "passed": None,
+        }
     indices = np.unique(np.linspace(0, len(load) - 1, point_count, dtype=int))
     net = build_pandapower_network(case)
     rows = []
@@ -218,7 +296,7 @@ def print_generation_progress(
 
 
 class OperatingPointSampler:
-    """Generate loads and controls over slightly extended training ranges."""
+    """Generate loads and independent controls over extended training ranges."""
 
     def __init__(
         self,
@@ -227,11 +305,8 @@ class OperatingPointSampler:
         seed: int,
         load_range_extension: float,
         free_range_extension: float,
-        free_exploration_fraction: float,
-        boundary_sampling_probability: float,
-        active_power_loss_fraction: float,
     ):
-        """Initialize a convergence-aware Halton sampler around the base point.
+        """Initialize reproducible load and free-control samplers.
 
         Parameters
         ----------
@@ -240,21 +315,11 @@ class OperatingPointSampler:
         case : Case118
             IEEE-118 topology and operating limits.
         seed : int
-            Scrambling seed for deterministic low-discrepancy sampling.
+            Seed for the scrambled load Halton sequence and NumPy control RNG.
         load_range_extension : float
             Extra fraction of the configured load-factor span on each side.
         free_range_extension : float
             Extra fraction of each physical free-variable span on each side.
-        free_exploration_fraction : float
-            Fraction of the distance from the PGLib base point to an independent
-            random target used for all coordinates. Selected samples also place
-            one rotating coordinate at an extended boundary.
-        boundary_sampling_probability : float
-            Fraction of samples that place one rotating control at an extended
-            boundary. The remaining samples perturb all controls locally.
-        active_power_loss_fraction : float
-            Approximate network-loss fraction used to balance sampled
-            nonreference generation against each sample's active load.
         """
         scale_min = float(base_metadata["load_scale_min"])
         scale_max = float(base_metadata["load_scale_max"])
@@ -274,123 +339,43 @@ class OperatingPointSampler:
         self.free_sampling_lower = self.free_lower - free_range_extension * free_span
         self.free_sampling_upper = self.free_upper + free_range_extension * free_span
         self.free_dim = len(self.free_lower)
-        self.n_free_pg = len(case.nonreference_active_generators)
-        self.free_exploration_fraction = float(free_exploration_fraction)
-        self.boundary_sampling_probability = float(boundary_sampling_probability)
-        self.active_power_loss_fraction = float(active_power_loss_fraction)
-        self.free_nominal = np.r_[
-            case.gen[case.nonreference_active_generators, 1],
-            case.bus[case.voltage_control_buses, 7],
-        ]
-        self.free_nominal = np.clip(
-            self.free_nominal, self.free_lower, self.free_upper,
+        self.load_sequence = qmc.Halton(
+            d=len(case.load_buses), scramble=True, seed=seed,
         )
-        self.sequence = qmc.Halton(
-            d=len(case.load_buses) + self.free_dim + 2,
-            scramble=True,
-            seed=seed,
-        )
+        self.control_rng = np.random.default_rng(seed)
 
-    @staticmethod
-    def _project_box_sum(
-        values: np.ndarray,
-        lower: np.ndarray,
-        upper: np.ndarray,
-        target: np.ndarray,
-    ) -> np.ndarray:
-        """Project each row onto box bounds and a prescribed component sum.
+    def draw(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return Halton loads and independent uniform free controls.
 
         Parameters
         ----------
-        values : np.ndarray, shape (batch, n_free_pg)
-            Unbalanced active-power samples in MW.
-        lower, upper : np.ndarray, shape (batch, n_free_pg)
-            Per-sample box bounds. A component can be fixed by equal bounds.
-        target : np.ndarray, shape (batch,)
-            Required sum of nonreference active generation in MW.
+        n_samples : int
+            Positive number of operating points to sample.
 
         Returns
         -------
-        np.ndarray, shape (batch, n_free_pg)
-            Box-feasible powers whose row sums match ``target`` numerically.
+        load : np.ndarray, shape (n_samples, n_load_buses, 2)
+            Active and reactive loads in MW/Mvar. Each bus has an independent
+            Halton scale factor, shared by its active and reactive components.
+        u : np.ndarray, shape (n_samples, free_dim)
+            Independent ``[Pg_nonref,V_PV,V_ref]`` samples in MW and p.u.
         """
-        span = upper - lower
-        target = np.clip(target, lower.sum(axis=1), upper.sum(axis=1))
-        shift_lower = np.full(len(values), -2.0)
-        shift_upper = np.full(len(values), 2.0)
-        for _ in range(48):
-            shift = 0.5 * (shift_lower + shift_upper)
-            projected = np.clip(values + shift[:, None] * span, lower, upper)
-            below = projected.sum(axis=1) < target
-            shift_lower = np.where(below, shift, shift_lower)
-            shift_upper = np.where(below, shift_upper, shift)
-        return np.clip(
-            values + shift_upper[:, None] * span, lower, upper,
-        )
-
-    def draw(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
-        """Return synthetic loads and free controls near physical boundaries."""
-        unit = self.sequence.random(n_samples)
         n_load = len(self.case.load_buses)
-        expected_width = n_load + self.free_dim + 2
-        if unit.shape != (n_samples, expected_width):
+        load_unit = self.load_sequence.random(n_samples)
+        if load_unit.shape != (n_samples, n_load):
             raise ValueError(
-                f"Halton samples must have shape ({n_samples},{expected_width})"
+                f"Halton load samples must have shape ({n_samples},{n_load})"
             )
         load_factor = (
             self.load_factor_lower
-            + unit[:, :n_load] * (self.load_factor_upper - self.load_factor_lower)
+            + load_unit * (self.load_factor_upper - self.load_factor_lower)
         )
         base_load = self.case.bus[self.case.load_buses, 2:4]
         load = base_load[None, :, :] * load_factor[:, :, None]
-        target_unit = unit[:, n_load:n_load + self.free_dim]
-        target = self.free_sampling_lower + target_unit * (
-            self.free_sampling_upper - self.free_sampling_lower
-        )
-        u = self.free_nominal + self.free_exploration_fraction * (
-            target - self.free_nominal
-        )
-        # Boundary-local sampling covers every control limit without placing all
-        # 72 IEEE-118 controls at unrelated extremes in the same PF instance.
-        boundary_component = np.minimum(
-            (unit[:, -2] * self.free_dim).astype(int), self.free_dim - 1,
-        )
-        boundary_mask = unit[:, -1] < self.boundary_sampling_probability
-        rows = np.arange(n_samples)
-        boundary_upper = target_unit[rows, boundary_component] >= 0.5
-        boundary_rows = rows[boundary_mask]
-        boundary_columns = boundary_component[boundary_mask]
-        u[boundary_rows, boundary_columns] = np.where(
-            boundary_upper[boundary_mask],
-            self.free_sampling_upper[boundary_columns],
-            self.free_sampling_lower[boundary_columns],
-        )
-        pg_lower = np.broadcast_to(
-            self.free_sampling_lower[:self.n_free_pg],
-            (n_samples, self.n_free_pg),
-        ).copy()
-        pg_upper = np.broadcast_to(
-            self.free_sampling_upper[:self.n_free_pg],
-            (n_samples, self.n_free_pg),
-        ).copy()
-        active_boundary = boundary_mask & (boundary_component < self.n_free_pg)
-        active_rows = rows[active_boundary]
-        active_columns = boundary_component[active_boundary]
-        if len(active_rows):
-            fixed = u[active_rows, active_columns]
-            pg_lower[active_rows, active_columns] = fixed
-            pg_upper[active_rows, active_columns] = fixed
-        reference = self.case.reference_generator
-        reference_target = 0.5 * (
-            self.case.gen[reference, 8] + self.case.gen[reference, 9]
-        )
-        active_load = load[..., 0].sum(axis=1)
-        free_pg_target = (
-            (1.0 + self.active_power_loss_fraction) * active_load
-            - reference_target
-        )
-        u[:, :self.n_free_pg] = self._project_box_sum(
-            u[:, :self.n_free_pg], pg_lower, pg_upper, free_pg_target,
+        u = self.control_rng.uniform(
+            self.free_sampling_lower,
+            self.free_sampling_upper,
+            size=(n_samples, self.free_dim),
         )
         return load.astype(np.float32), u.astype(np.float32)
 
@@ -401,18 +386,89 @@ def validate_labels(
     chi: np.ndarray,
     batch_size: int = 4096,
 ) -> float:
-    """Return the largest normalized AC equality residual in the labels."""
-    physics = ACReconstruction()
+    """Return the largest double-precision AC equality residual in the labels.
+
+    Parameters
+    ----------
+    u : np.ndarray, shape (n_samples,free_dim)
+        Free controls ``[Pg_nonref,V_PV,V_ref]`` in MW and p.u.
+    load : np.ndarray, shape (n_samples,n_load_buses,2)
+        Active/reactive loads in MW/Mvar.
+    chi : np.ndarray, shape (n_samples,chi_dim)
+        Fixed-PV labels ``[theta_PV,theta_PQ,V_PQ]`` in rad and p.u.
+    batch_size : int, default=4096
+        Number of labels checked together to limit temporary complex arrays.
+
+    Returns
+    -------
+    float
+        Maximum nonreference P and PQ-bus Q mismatch in p.u.
+
+    Notes
+    -----
+    Dataset acceptance uses NumPy float64 and the original complex ``Ybus``.
+    The training reconstruction intentionally uses float32, whose accumulated
+    roundoff on IEEE-118 is too large for a strict solver-quality check.
+    """
+    case = load_case118()
+    expected = (
+        (len(u), len(case.load_buses), 2),
+        (len(u), len(case.nonreference_active_generators)
+         + len(case.voltage_control_buses)),
+        (len(u), len(case.pv_buses) + 2 * len(case.pq_buses)),
+    )
+    if load.shape != expected[0] or u.shape != expected[1] or chi.shape != expected[2]:
+        raise ValueError(
+            f"invalid label arrays: load={load.shape}, u={u.shape}, chi={chi.shape}; "
+            f"expected {expected}"
+        )
+
+    n_pv = len(case.pv_buses)
+    nonreference_buses = np.r_[case.pv_buses, case.pq_buses]
     maximum = 0.0
-    with torch.no_grad():
-        for start in range(0, len(u), batch_size):
-            stop = min(start + batch_size, len(u))
-            state = physics.reconstruct(
-                torch.from_numpy(u[start:stop]),
-                torch.from_numpy(load[start:stop]),
-                torch.from_numpy(chi[start:stop]),
-            )
-            maximum = max(maximum, float(state["pf_residual"].max()))
+    for start in range(0, len(u), batch_size):
+        stop = min(start + batch_size, len(u))
+        u_batch = np.asarray(u[start:stop], dtype=np.float64)
+        load_batch = np.asarray(load[start:stop], dtype=np.float64)
+        chi_batch = np.asarray(chi[start:stop], dtype=np.float64)
+
+        vm = np.ones((stop - start, case.n_bus), dtype=np.float64)
+        va = np.zeros_like(vm)
+        vm[:, case.voltage_control_buses] = u_batch[:, len(
+            case.nonreference_active_generators
+        ):]
+        vm[:, case.pq_buses] = chi_batch[:, n_pv + len(case.pq_buses):]
+        va[:, case.pv_buses] = chi_batch[:, :n_pv]
+        va[:, case.pq_buses] = chi_batch[:, n_pv:n_pv + len(case.pq_buses)]
+
+        voltage = vm * np.exp(1j * va)
+        current = voltage @ case.ybus.T
+        injection = voltage * np.conj(current) * case.base_mva
+
+        pd = np.zeros((stop - start, case.n_bus), dtype=np.float64)
+        qd = np.zeros_like(pd)
+        pd[:, case.load_buses] = load_batch[:, :, 0]
+        qd[:, case.load_buses] = load_batch[:, :, 1]
+        pg = np.broadcast_to(case.gen[:, 9], (stop - start, case.n_gen)).copy()
+        pg[:, case.nonreference_active_generators] = u_batch[:, :len(
+            case.nonreference_active_generators
+        )]
+        pgen_bus = np.zeros_like(pd)
+        for generator, bus in enumerate(case.generator_buses):
+            pgen_bus[:, bus] += pg[:, generator]
+
+        active_residual = (
+            injection.real[:, nonreference_buses]
+            - (pgen_bus - pd)[:, nonreference_buses]
+        ) / case.base_mva
+        reactive_residual = (
+            injection.imag[:, case.pq_buses] + qd[:, case.pq_buses]
+        ) / case.base_mva
+        maximum = max(
+            maximum,
+            float(np.max(np.abs(active_residual))),
+            float(np.max(np.abs(reactive_residual))),
+        )
     return maximum
 
 
@@ -425,13 +481,22 @@ def main() -> None:
     n_samples = 50000
     parser.add_argument(
         "--base-data", type=Path,
-        default=ROOT / "Data_generation" / "data" / "e2e118_N10000_S20_T16",
+        default=ROOT / "Data_generation" / "data" / "e2e118_N5000_S20_T16",
         help="SMPC dataset whose metadata defines the complete load scale range",
     )
     parser.add_argument(
-        "--output", type=Path,
-        default=ROOT / "Data_generation" / "data" / f"e2e118_decs_pgm_fixedpv_N{n_samples}",
-        help="new directory for fixed-PV DECS arrays and metadata",
+        "--solver", choices=("pandapower", "pgm"), default="pandapower",
+        help=(
+            "fixed-PV label solver: pandapower uses sequential Newton solves "
+            "with warm-start/flat fallback; pgm uses native batch calculation"
+        ),
+    )
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help=(
+            "new fixed-PV DECS directory; omitted means "
+            "e2e118_decs_{solver}_N{n_samples}"
+        ),
     )
     parser.add_argument("--n-samples", type=int, default=n_samples)
     parser.add_argument(
@@ -439,34 +504,18 @@ def main() -> None:
         help="range extension on each side divided by load_scale_max-load_scale_min",
     )
     parser.add_argument(
-        "--free-range-extension", type=float, default=0.05,
+        "--free-range-extension", type=float, default=0.02,
         help=(
             "free-control extension on each side divided by its physical range; "
             "applies to nonreference Pg, PV voltage, and reference voltage"
         ),
     )
     parser.add_argument(
-        "--free-exploration-fraction", type=float, default=0.35,
-        help=(
-            "fraction of the displacement from the PGLib base point toward an "
-            "independent random control target; one control per sample is still "
-            "placed at an extended boundary"
-        ),
-    )
-    parser.add_argument(
-        "--boundary-sampling-probability", type=float, default=0.10,
-        help="fraction of samples with one free control at an extended boundary",
-    )
-    parser.add_argument(
-        "--active-power-loss-fraction", type=float, default=0.03,
-        help=(
-            "approximate fraction of active load reserved for network losses "
-            "when balancing sampled nonreference generator powers"
-        ),
-    )
-    parser.add_argument(
         "--batch-size", type=int, default=1000,
-        help="native PGM operating points per batch; directly adjustable",
+        help=(
+            "native PGM operating points per batch; for pandapower this only "
+            "sets the sampling/progress chunk because solves remain sequential"
+        ),
     )
     parser.add_argument("--pgm-error-tolerance", type=float, default=1e-10)
     parser.add_argument("--max-iterations", type=int, default=30)
@@ -475,17 +524,32 @@ def main() -> None:
         help="PGM workers: negative is sequential, zero uses all hardware threads",
     )
     parser.add_argument(
-        "--verify-points", type=int, default=100,
-        help="saved labels cross-checked with fixed-PV pandapower; zero disables",
+        "--verify-points", type=int, default=1000,
+        help=(
+            "PGM labels cross-checked with pandapower; ignored when pandapower "
+            "is already the label solver; zero disables"
+        ),
     )
     parser.add_argument("--pandapower-tolerance-mva", type=float, default=1e-8)
     parser.add_argument(
         "--max-attempt-factor", type=float, default=3.0,
         help="maximum attempted-to-accepted PF ratio for IEEE-118 sampling",
     )
+    parser.add_argument(
+        "--minimum-pq-voltage", type=float, default=0.01,
+        help=(
+            "minimum PQ-bus voltage in p.u. used to retain the normal "
+            "high-voltage PF branch; rejects rare converged low-voltage roots"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--progress-every", type=int, default=100)
     args = parser.parse_args()
+    if args.output is None:
+        args.output = (
+            ROOT / "Data_generation" / "data"
+            / f"e2e118_decs_{args.solver}_N{args.n_samples}"
+        )
 
     if min(args.n_samples, args.batch_size, args.max_iterations, args.progress_every) < 1:
         raise ValueError("sample count, batch size, iterations, and progress interval must be positive")
@@ -493,12 +557,8 @@ def main() -> None:
         raise ValueError("at least three samples are required and verify_points is nonnegative")
     if min(args.load_range_extension, args.free_range_extension) < 0.0:
         raise ValueError("load and free range extensions must be nonnegative")
-    if not 0.0 < args.free_exploration_fraction <= 1.0:
-        raise ValueError("free_exploration_fraction must lie in (0,1]")
-    if not 0.0 <= args.boundary_sampling_probability <= 1.0:
-        raise ValueError("boundary_sampling_probability must lie in [0,1]")
-    if not 0.0 <= args.active_power_loss_fraction <= 0.25:
-        raise ValueError("active_power_loss_fraction must lie in [0,0.25]")
+    if not 0.0 < args.minimum_pq_voltage < 1.0:
+        raise ValueError("minimum_pq_voltage must lie in (0,1) p.u.")
     if (
         args.pgm_error_tolerance <= 0.0
         or args.pandapower_tolerance_mva <= 0.0
@@ -519,9 +579,6 @@ def main() -> None:
     sampler = OperatingPointSampler(
         metadata_base, case, args.seed,
         args.load_range_extension, args.free_range_extension,
-        args.free_exploration_fraction,
-        args.boundary_sampling_probability,
-        args.active_power_loss_fraction,
     )
 
     print("Fixed-PV DECS dataset generation", flush=True)
@@ -535,17 +592,32 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"  free controls: physical bounds extended by "
+        f"  free controls: independent uniform samples over bounds extended by "
         f"{args.free_range_extension:.1%} of each span per side",
         flush=True,
     )
     print("  bus model: fixed PV; Q limits are not enforced by the PF solver", flush=True)
-    pgm_case = build_pgm_case(case)
-    print(
-        f"  power-grid-model {version('power-grid-model')}; "
-        f"batch_size={args.batch_size}, threading={args.threading}",
-        flush=True,
+    if args.solver == "pgm":
+        from pgm_batch_power_flow import build_pgm_case
+
+        pgm_case = build_pgm_case(case)
+    else:
+        pgm_case = None
+    pandapower_net = (
+        build_pandapower_network(case) if args.solver == "pandapower" else None
     )
+    if args.solver == "pgm":
+        print(
+            f"  solver: power-grid-model {version('power-grid-model')}; "
+            f"native batch_size={args.batch_size}, threading={args.threading}",
+            flush=True,
+        )
+    else:
+        print(
+            f"  solver: pandapower {version('pandapower')}; sequential Newton "
+            "with previous-result warm start and flat fallback",
+            flush=True,
+        )
 
     saved_load: list[np.ndarray] = []
     saved_u: list[np.ndarray] = []
@@ -560,10 +632,23 @@ def main() -> None:
             maximum_attempts - attempts,
         )
         load_batch, u_batch = sampler.draw(draw_count)
-        chi_batch, converged = solve_power_flow_batch(
-            pgm_case, case, load_batch, u_batch,
-            args.pgm_error_tolerance, args.max_iterations, args.threading,
+        if args.solver == "pgm":
+            chi_batch, converged = solve_power_flow_batch_pgm(
+                pgm_case, case, load_batch, u_batch,
+                args.pgm_error_tolerance, args.max_iterations, args.threading,
+            )
+        else:
+            chi_batch, converged = solve_power_flow_batch_pandapower(
+                pandapower_net, case, load_batch, u_batch,
+                args.pandapower_tolerance_mva, args.max_iterations,
+            )
+        # Newton iterations can converge to a mathematically valid low-voltage
+        # root. DECS retains only the normal high-voltage PF branch.
+        n_angle = len(case.pv_buses) + len(case.pq_buses)
+        high_voltage_branch = np.min(chi_batch[:, n_angle:], axis=1) >= (
+            args.minimum_pq_voltage
         )
+        converged &= high_voltage_branch
         attempts += draw_count
         failures += int((~converged).sum())
         if converged.any():
@@ -591,17 +676,30 @@ def main() -> None:
     maximum_residual = validate_labels(u, load, chi)
     if maximum_residual > LABEL_RESIDUAL_TOLERANCE_PU:
         raise RuntimeError(
-            f"PGM labels disagree with local AC equations: {maximum_residual:.3e} p.u."
+            f"{args.solver} labels disagree with local AC equations: "
+            f"{maximum_residual:.3e} p.u."
         )
-    pandapower_report = compare_labels_with_pandapower(
-        case, load, u, chi, args.verify_points,
-        args.pandapower_tolerance_mva, args.max_iterations,
-    )
-    if args.verify_points and not pandapower_report["passed"]:
-        raise RuntimeError(
-            "fixed-PV PGM labels failed pandapower equivalence: "
-            f"max error={pandapower_report['maximum_absolute_chi_error']}"
+    if args.solver == "pgm":
+        pandapower_report = compare_labels_with_pandapower(
+            case, load, u, chi, args.verify_points,
+            args.pandapower_tolerance_mva, args.max_iterations,
         )
+        if args.verify_points and not pandapower_report["passed"]:
+            raise RuntimeError(
+                "fixed-PV PGM labels failed pandapower equivalence: "
+                f"max error={pandapower_report['maximum_absolute_chi_error']}"
+            )
+    else:
+        pandapower_report = {
+            "points_requested": 0,
+            "points_converged": 0,
+            "maximum_absolute_chi_error": None,
+            "passed": None,
+            "note": (
+                "pandapower is the label solver; labels are independently "
+                "checked by the saved AC-equation residual"
+            ),
+        }
 
     order = np.random.default_rng(args.seed + 1).permutation(args.n_samples)
     n_validation = max(1, int(0.1 * args.n_samples))
@@ -637,8 +735,18 @@ def main() -> None:
     metadata = {
         "dataset_type": "decs_power_flow",
         "case_name": case.name,
-        "solver": "power_grid_model.native_batch_newton_raphson",
-        "power_grid_model_version": version("power-grid-model"),
+        "solver": (
+            "pandapower.sequential_newton_raphson_warm_flat_fallback"
+            if args.solver == "pandapower"
+            else "power_grid_model.native_batch_newton_raphson"
+        ),
+        "solver_choice": args.solver,
+        "solver_version": version(
+            "pandapower" if args.solver == "pandapower" else "power-grid-model"
+        ),
+        "power_grid_model_version": (
+            version("power-grid-model") if args.solver == "pgm" else None
+        ),
         "bus_type_model": "fixed_PV_PQ",
         "enforce_q_limits": False,
         "pv_to_pq_switching": False,
@@ -652,21 +760,29 @@ def main() -> None:
         "load_range_extension": args.load_range_extension,
         "load_factor_lower": sampler.load_factor_lower,
         "load_factor_upper": sampler.load_factor_upper,
-        "free_variable_sampling": (
-            "load-balanced_local_halton_with_rotating_boundary_controls"
-        ),
+        "free_variable_sampling": "independent_uniform_extended_physical_bounds",
         "free_range_extension": args.free_range_extension,
-        "free_exploration_fraction": args.free_exploration_fraction,
-        "boundary_sampling_probability": args.boundary_sampling_probability,
-        "boundary_controls_per_selected_sample": 1,
-        "active_power_balance": "load_plus_loss_minus_reference_midpoint",
-        "active_power_loss_fraction": args.active_power_loss_fraction,
-        "pgm_error_tolerance": args.pgm_error_tolerance,
+        "reference_active_power": "dependent_variable_solved_by_power_flow",
+        "pgm_error_tolerance": (
+            args.pgm_error_tolerance if args.solver == "pgm" else None
+        ),
+        "pandapower_tolerance_mva": args.pandapower_tolerance_mva,
+        "pandapower_initialization": (
+            "previous_results_then_flat_fallback"
+            if args.solver == "pandapower" else None
+        ),
         "max_iterations": args.max_iterations,
-        "threading": args.threading,
+        "minimum_pq_voltage_pu": args.minimum_pq_voltage,
+        "solution_branch": "normal_high_voltage",
+        "threading": args.threading if args.solver == "pgm" else None,
         "batch_size": args.batch_size,
-        "batch_size_selection": "explicit_default_1000",
+        "batch_size_role": (
+            "native_solver_batch"
+            if args.solver == "pgm" else "sampling_and_progress_chunk_only"
+        ),
+        "solver_batch_size": args.batch_size if args.solver == "pgm" else 1,
         "maximum_label_residual_pu": maximum_residual,
+        "label_residual_validation": "numpy_float64_original_ybus",
         "label_residual_acceptance_pu": LABEL_RESIDUAL_TOLERANCE_PU,
         "seed": args.seed,
         "rho_order": ["p_PV", "V_PV_target", "V_ref", "p_PQ", "q_PQ"],
@@ -691,10 +807,11 @@ def main() -> None:
         json.dumps(metadata, indent=2), encoding="utf-8",
     )
     print(f"maximum label PF residual: {maximum_residual:.3e} p.u.")
-    print(
-        "pandapower max label difference: "
-        f"{pandapower_report['maximum_absolute_chi_error']}"
-    )
+    if args.solver == "pgm":
+        print(
+            "pandapower max label difference: "
+            f"{pandapower_report['maximum_absolute_chi_error']}"
+        )
     print(f"total generation time: {format_duration(perf_counter() - start_time)}")
     print(f"saved fixed-PV DECS dataset to {args.output}")
 

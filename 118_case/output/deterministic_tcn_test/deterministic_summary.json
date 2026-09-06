@@ -1,0 +1,65 @@
+{
+  "method": "Deterministic-TCN + pgm validation",
+  "exact_solver": "pgm",
+  "power_grid_model_version": "1.13.154",
+  "pandapower_version": "3.4.0",
+  "checkpoint": "D:\\desk\\TBSI\\2026_8_generative_SMPC\\code\\118_case\\Neural_network\\deterministic_tcn.pt",
+  "data_split": "test",
+  "n_instances": 200,
+  "candidates_per_instance": 1,
+  "feasible_instances": 166,
+  "feasibility_rate": 0.83,
+  "deterministic_model_load_seconds": 1.7850992999738082,
+  "exact_solver_setup_seconds": 0.002305600035469979,
+  "pgm_setup_seconds": 0.002305600035469979,
+  "inference_warmup_seconds": 2.495574700005818,
+  "neural_time_excludes_pgm_validation": true,
+  "time_seconds": {
+    "mean": 0.004628905502322596,
+    "median": 0.0037660500092897564,
+    "p95": 0.007956005027517676
+  },
+  "generation_seconds": {
+    "mean": 0.004628905502322596,
+    "median": 0.0037660500092897564,
+    "p95": 0.007956005027517676
+  },
+  "pgm_validation_seconds": {
+    "mean": 0.1513711254991358,
+    "median": 0.14893575001042336,
+    "p95": 0.1565123500127811
+  },
+  "exact_validation_seconds": {
+    "mean": 0.1513711254991358,
+    "median": 0.14893575001042336,
+    "p95": 0.1565123500127811
+  },
+  "pgm_power_flow_seconds": {
+    "mean": 0.030705961999774444,
+    "median": 0.030598999990615994,
+    "p95": 0.038280584989115594
+  },
+  "best_cost": {
+    "mean": 1556493.6293116251,
+    "median": 1583726.8514984574,
+    "p95": 1664771.7018364358
+  },
+  "feasible_solution_cost": {
+    "mean": 1543900.8402696375,
+    "median": 1570671.8088960096,
+    "p95": 1659176.3025187883
+  },
+  "all_solution_cost": {
+    "mean": 1556493.6293116251,
+    "median": 1583726.8514984574,
+    "p95": 1664771.7018364358
+  },
+  "cost_available_instances": 200,
+  "cost_unavailable_instances": 0,
+  "pandapower_equivalence_passed": true,
+  "ramp_fraction_of_pmax": 0.25,
+  "feasibility_tolerance": 0.0001,
+  "balance_tolerance_mva": 1e-05,
+  "pgm_error_tolerance": 1e-08,
+  "exact_feasibility_rule": "converged AC power flow and Pg/Qg/V/angle/thermal/ramp bounds"
+}

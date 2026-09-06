@@ -1,0 +1,4 @@
+# Generated arrays exceeding GitHub's 100 MB per-file limit.
+/14_case/Data_generation/data/e2e14_N5000_S20_T16/future_load.npy
+/118_case/Data_generation/data/e2e118_N5000_S20_T16/future_load.npy
+/118_case/Data_generation/data/e2e118_N5000_S20_T16/future_pool.npy

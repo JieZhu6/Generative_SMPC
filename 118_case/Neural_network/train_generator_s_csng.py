@@ -1,4 +1,4 @@
-"""Train the sigmoid-output S-CSNG benchmark."""
+"""Train S-CSNG with the shared CSNG optimization defaults."""
 
 import sys
 from pathlib import Path
@@ -11,7 +11,7 @@ from Neural_network.train_generator import main as run_generator_training
 
 
 def main() -> None:
-    """Run two-stage S-CSNG training with sigmoid output parameterization."""
+    """Run sigmoid-output S-CSNG through the shared training entry point."""
     run_generator_training("s_csng")
 
 

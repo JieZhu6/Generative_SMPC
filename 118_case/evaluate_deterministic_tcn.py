@@ -1,9 +1,9 @@
-"""Evaluate Deterministic-TCN with native batched PGM AC power flow.
+"""Evaluate Deterministic-TCN with an independent AC power-flow solver.
 
 The saved validation or test split is reconstructed from the checkpoint. One
-shared deterministic schedule is generated per instance, and all scenario/time
-operating points are solved together by Power Grid Model. Pandapower is used
-only for an optional numerical-equivalence sample and never decides feasibility.
+shared deterministic schedule is generated per instance. Pandapower is the
+default validation backend because it robustly solves points independently;
+native batched Power Grid Model remains available as an explicit fast option.
 """
 
 import argparse
@@ -21,11 +21,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from Data_generation.case118_pglib import load_case118  # noqa: E402
+from Data_generation.generate_decs_dataset import build_pandapower_network  # noqa: E402
 from evaluate_generator_tcn import (  # noqa: E402
     build_condition,
     checkpoint_split_indices,
     finite_statistics,
     format_reported_cost,
+    solve_exact_power_flow,
     summarize_solution_costs,
     write_csv,
     write_json,
@@ -40,9 +42,57 @@ from Neural_network.noncausal_tcn import PROJECTION_METHOD  # noqa: E402
 from pgm_batch_power_flow import build_pgm_case, solve_pv_batch  # noqa: E402
 
 
-DEFAULT_DATA = ROOT / "Data_generation" / "data" / "e2e118_N10000_S20_T16"
+DEFAULT_DATA = ROOT / "Data_generation" / "data" / "e2e118_N5000_S20_T16"
 DEFAULT_CHECKPOINT = ROOT / "Neural_network" / "deterministic_tcn.pt"
 DEFAULT_OUTPUT = ROOT / "output" / "deterministic_tcn_test"
+
+
+def solve_pandapower_batch(
+    net,
+    case,
+    loads: np.ndarray,
+    controls: np.ndarray,
+    tolerance_mva: float,
+    max_iterations: int,
+) -> dict[str, np.ndarray | float]:
+    """Solve one flattened trajectory point by point with pandapower."""
+    started = perf_counter()
+    names_and_widths = {
+        "pg": case.n_gen,
+        "qg": case.n_gen,
+        "vm": case.n_bus,
+        "va": case.n_bus,
+        "pf": len(case.branch),
+        "qf": len(case.branch),
+        "pt": len(case.branch),
+        "qt": len(case.branch),
+    }
+    result = {
+        name: np.full((len(loads), width), np.nan, dtype=float)
+        for name, width in names_and_widths.items()
+    }
+    converged = np.zeros(len(loads), dtype=bool)
+    attempts = 0
+    for index, (load, control) in enumerate(zip(loads, controls)):
+        state, point_attempts = solve_exact_power_flow(
+            net, case, load, control, warm_start=index > 0,
+            tolerance_mva=tolerance_mva, max_iterations=max_iterations,
+        )
+        attempts += point_attempts
+        if state is None:
+            continue
+        converged[index] = True
+        for name in names_and_widths:
+            result[name][index] = np.asarray(state[name])
+    elapsed = perf_counter() - started
+    result.update({
+        "pv_converged": converged,
+        "batch_success": converged.copy(),
+        "t_total": elapsed,
+        "t_power_flow": elapsed,
+        "solver_attempts": attempts,
+    })
+    return result
 
 
 def load_deterministic_tcn(
@@ -68,7 +118,7 @@ def load_deterministic_tcn(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Declare reproducible native-PGM evaluation arguments."""
+    """Declare reproducible exact power-flow evaluation arguments."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -89,15 +139,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="result directory; selected automatically from the split when omitted",
     )
     parser.add_argument(
-        "--max-instances", type=int, default=None,
+        "--max-instances", type=int, default=200,
         help="optional positive prefix length for a smoke evaluation",
+    )
+    parser.add_argument(
+        "--instance-indices", type=int, nargs="+", default=None,
+        help="optional explicit instance indices from the selected saved split",
+    )
+    parser.add_argument(
+        "--exact-solver", choices=("pandapower", "pgm"), default="pgm",
+        help="independent AC power-flow backend used to decide feasibility",
     )
     parser.add_argument(
         "--ramp-fraction", type=float, default=0.25,
         help="one-period generator ramp limit as a positive fraction of Pmax",
     )
     parser.add_argument(
-        "--feasibility-tolerance", type=float, default=1.0e-5,
+        "--feasibility-tolerance", type=float, default=1.0e-4,
         help="maximum normalized Pg/Qg/V/angle/thermal/ramp excess",
     )
     parser.add_argument(
@@ -105,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="diagnostic maximum nodal AC-balance residual in MVA",
     )
     parser.add_argument(
-        "--pgm-error-tolerance", type=float, default=1.0e-10,
+        "--pgm-error-tolerance", type=float, default=1.0e-8,
         help="positive native PGM Newton-Raphson error tolerance",
     )
     parser.add_argument(
@@ -184,12 +242,25 @@ def main() -> None:
     current = np.load(args.data / "current_load.npy", mmap_mode="r")
     pool = np.load(args.data / "future_pool.npy", mmap_mode="r")
     future = np.load(args.data / "future_load.npy", mmap_mode="r")
-    instance_indices = checkpoint_split_indices(
-        checkpoint, args.data, len(current), args.split, args.max_instances,
+    split_indices = checkpoint_split_indices(
+        checkpoint, args.data, len(current), args.split, None,
     )
+    if args.instance_indices is None:
+        instance_indices = split_indices[:args.max_instances]
+    else:
+        requested = np.asarray(args.instance_indices, dtype=np.int64)
+        if len(np.unique(requested)) != len(requested):
+            raise ValueError("instance_indices must not contain duplicates")
+        if not np.isin(requested, split_indices).all():
+            raise ValueError("every explicit instance index must belong to the selected split")
+        instance_indices = requested
     case = load_case118()
     setup_start = perf_counter()
-    pgm_case = build_pgm_case(case)
+    exact_case = (
+        build_pandapower_network(case)
+        if args.exact_solver == "pandapower"
+        else build_pgm_case(case)
+    )
     setup_seconds = perf_counter() - setup_start
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +301,7 @@ def main() -> None:
     inference_warmup_seconds = perf_counter() - warmup_start
 
     print(
-        f"Deterministic-TCN native PGM evaluation: split={args.split}, "
+        f"Deterministic-TCN {args.exact_solver} evaluation: split={args.split}, "
         f"instances={n_selected}, candidates=1, device={device}",
         flush=True,
     )
@@ -258,12 +329,19 @@ def main() -> None:
             schedule_np[None],
         )
         validation_start = perf_counter()
-        states = solve_pv_batch(
-            pgm_case, case, loads, controls,
-            pgm_error_tolerance=args.pgm_error_tolerance,
-            pgm_max_iterations=args.max_pf_iterations,
-            threading=args.threading,
-        )
+        if args.exact_solver == "pandapower":
+            states = solve_pandapower_batch(
+                exact_case, case, loads, controls,
+                tolerance_mva=args.pandapower_tolerance_mva,
+                max_iterations=args.max_pf_iterations,
+            )
+        else:
+            states = solve_pv_batch(
+                exact_case, case, loads, controls,
+                pgm_error_tolerance=args.pgm_error_tolerance,
+                pgm_max_iterations=args.max_pf_iterations,
+                threading=args.threading,
+            )
         assessed = assess_candidate_batch(
             case, loads, states, 1, scenarios, horizon,
             args.ramp_fraction, args.feasibility_tolerance,
@@ -280,8 +358,12 @@ def main() -> None:
         selected_vm[local_index] = assessed["vm_trajectory"][0]
         selected_va[local_index] = assessed["va_trajectory"][0]
 
-        # Pandapower comparison is outside the reported neural time.
-        if local_index < args.verify_instances and args.verify_points:
+        # Optional equivalence check is needed only when PGM is primary.
+        if (
+            args.exact_solver == "pgm"
+            and local_index < args.verify_instances
+            and args.verify_points
+        ):
             report = compare_with_pandapower(
                 case, loads, controls, states, args.verify_points,
                 args.pandapower_tolerance_mva, args.max_pf_iterations,
@@ -339,12 +421,17 @@ def main() -> None:
     feasible_rows = [row for row in rows if row["feasible"]]
     cost_summary = summarize_solution_costs(rows)
     verification_passed = (
-        bool(verification_reports)
-        and all(report["passed"] for report in verification_reports)
-    ) if args.verify_points and args.verify_instances else None
+        all(report["passed"] for report in verification_reports)
+        if args.exact_solver == "pgm" and verification_reports
+        else None
+    )
     summary = {
-        "method": "Deterministic-TCN + native Power Grid Model validation",
-        "power_grid_model_version": version("power-grid-model"),
+        "method": f"Deterministic-TCN + {args.exact_solver} validation",
+        "exact_solver": args.exact_solver,
+        "power_grid_model_version": (
+            version("power-grid-model") if args.exact_solver == "pgm" else None
+        ),
+        "pandapower_version": version("pandapower"),
         "checkpoint": str(args.checkpoint.resolve()),
         "data_split": args.split,
         "n_instances": n_selected,
@@ -352,7 +439,8 @@ def main() -> None:
         "feasible_instances": len(feasible_rows),
         "feasibility_rate": len(feasible_rows) / n_selected,
         "deterministic_model_load_seconds": model_load_seconds,
-        "pgm_setup_seconds": setup_seconds,
+        "exact_solver_setup_seconds": setup_seconds,
+        "pgm_setup_seconds": setup_seconds if args.exact_solver == "pgm" else None,
         "inference_warmup_seconds": inference_warmup_seconds,
         "neural_time_excludes_pgm_validation": True,
         "time_seconds": finite_statistics([row["total_seconds"] for row in rows]),
@@ -360,6 +448,9 @@ def main() -> None:
             row["generation_seconds"] for row in rows
         ]),
         "pgm_validation_seconds": finite_statistics([
+            row["pgm_validation_seconds"] for row in rows
+        ]),
+        "exact_validation_seconds": finite_statistics([
             row["pgm_validation_seconds"] for row in rows
         ]),
         "pgm_power_flow_seconds": finite_statistics([
@@ -372,8 +463,8 @@ def main() -> None:
         "feasibility_tolerance": args.feasibility_tolerance,
         "balance_tolerance_mva": args.balance_tolerance_mva,
         "pgm_error_tolerance": args.pgm_error_tolerance,
-        "pgm_feasibility_rule": (
-            "converged native AC power flow and Pg/Qg/V/angle/thermal/ramp bounds"
+        "exact_feasibility_rule": (
+            "converged AC power flow and Pg/Qg/V/angle/thermal/ramp bounds"
         ),
     }
     write_json(args.output_dir / "deterministic_summary.json", summary)

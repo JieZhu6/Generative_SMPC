@@ -45,7 +45,7 @@ from Neural_network.decs import (  # noqa: E402
 )
 
 
-DEFAULT_DATA = ROOT / "Data_generation" / "data" / "e2e118_N10000_S20_T16"
+DEFAULT_DATA = ROOT / "Data_generation" / "data" / "e2e118_N5000_S20_T16"
 DEFAULT_CHECKPOINT = ROOT / "Neural_network" / "generator_tcn_clip.pt"
 DEFAULT_DECS = ROOT / "Neural_network" / "decs_pgm_fixedpv.pt"
 DEFAULT_OUTPUT = ROOT / "output" / "ipopt_test"
@@ -860,10 +860,23 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def main_pandapower_reference() -> None:
-    """Run the retained DECS-plus-pandapower reference evaluation."""
+def main_pandapower_reference(benchmark: str = "csng") -> None:
+    """Run one Generator benchmark with DECS ranking and pandapower certification.
+
+    Parameters
+    ----------
+    benchmark : {"csng", "s_csng", "wd_csng"}, default="csng"
+        Generator variant whose model class, checkpoint, method label, and
+        benchmark-specific output directory are used for evaluation.
+    """
+    spec = get_benchmark_spec(benchmark)
+    default_checkpoint = ROOT / "Neural_network" / str(spec["checkpoint"])
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            f"Evaluate {spec['method']} with DECS candidate ranking and "
+            "independent pandapower certification."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA, help="base SMPC dataset")
     parser.add_argument(
@@ -874,8 +887,8 @@ def main_pandapower_reference() -> None:
         ),
     )
     parser.add_argument(
-        "--checkpoint", type=Path, default=DEFAULT_CHECKPOINT,
-        help="trained Generator-TCN checkpoint",
+        "--checkpoint", type=Path, default=default_checkpoint,
+        help=f"trained {spec['method']} checkpoint",
     )
     parser.add_argument(
         "--decs", type=Path, default=DEFAULT_DECS,
@@ -884,8 +897,7 @@ def main_pandapower_reference() -> None:
     parser.add_argument(
         "--output-dir", type=Path, default=None,
         help=(
-            "result directory; default is output/smpc_benchmark for test and "
-            "output/smpc_validation for validation"
+            "result directory; the default is benchmark- and split-specific"
         ),
     )
     parser.add_argument(
@@ -952,17 +964,20 @@ def main_pandapower_reference() -> None:
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     if args.output_dir is None:
-        args.output_dir = (
-            DEFAULT_OUTPUT if args.split == "test"
-            else DEFAULT_OUTPUT.parent / "ipopt_validation"
-        )
+        if benchmark == "csng":
+            args.output_dir = (
+                DEFAULT_OUTPUT if args.split == "test"
+                else DEFAULT_OUTPUT.parent / "ipopt_validation"
+            )
+        else:
+            args.output_dir = ROOT / "output" / f"{benchmark}_pandapower_{args.split}"
 
     device = torch.device(
         "cuda" if args.device == "auto" and torch.cuda.is_available()
         else "cpu" if args.device == "auto" else args.device
     )
     model_load_start = perf_counter()
-    model, checkpoint = load_generator(args.checkpoint, device)
+    model, checkpoint = load_generator(args.checkpoint, device, benchmark)
     generator_model_load_seconds = perf_counter() - model_load_start
     expected_decs_sha256 = checkpoint.get("decs_checkpoint_sha256")
     if expected_decs_sha256 and file_sha256(args.decs) != expected_decs_sha256:
@@ -1044,7 +1059,8 @@ def main_pandapower_reference() -> None:
     decs_warmup_seconds = perf_counter() - decs_warmup_start
 
     print(
-        f"Generator-TCN DECS-screened benchmark: split={args.split}, instances={n_selected}, "
+        f"{spec['method']} DECS-screened benchmark: split={args.split}, "
+        f"instances={n_selected}, "
         f"candidates={args.candidates}, "
         f"device={device}, pandapower setup={setup_seconds:.3f}s, "
         f"Generator/DECS warmup={inference_warmup_seconds:.3f}/"
@@ -1274,7 +1290,8 @@ def main_pandapower_reference() -> None:
     feasible_rows = [row for row in rows if row["feasible"]]
     cost_summary = summarize_solution_costs(rows)
     summary = {
-        "method": "Generator-TCN + DECS batch ranking + pandapower certification",
+        "method": f"{spec['method']} + DECS batch ranking + pandapower certification",
+        "benchmark": benchmark,
         "checkpoint": str(args.checkpoint.resolve()),
         "decs_checkpoint": str(args.decs.resolve()),
         "data_split": args.split,
@@ -1315,7 +1332,7 @@ def main_pandapower_reference() -> None:
 
 
 def main() -> None:
-    """Run the native PGM batch evaluator used for Generator results."""
+    """Run the PGM/fixed-PV batch evaluator used for Generator results."""
     from evaluate_generator_tcn_pgm_batch import main as pgm_main
 
     pgm_main()

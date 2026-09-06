@@ -20,7 +20,7 @@ import torch
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
+from matplotlib import font_manager  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,16 +42,18 @@ from evaluate_generator_tcn_pgm_batch import (  # noqa: E402
 )
 from pgm_batch_power_flow import build_pgm_case, solve_pv_batch  # noqa: E402
 from Neural_network.decs import load_decs_checkpoint  # noqa: E402
-from solve_shared_smpc_ipopt import (  # noqa: E402
+from evaluate_ipopt import (  # noqa: E402
     IPOPT_PATH,
     SharedTrajectorySMPCAcopf,
 )
 
 
-DEFAULT_DATA = ROOT / "Data_generation" / "data" / "e2e118_N10000_S20_T16"
+DEFAULT_DATA = ROOT / "Data_generation" / "data" / "e2e118_N5000_S20_T16"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "dispatch_distributions"
 DEFAULT_DECS = ROOT / "Neural_network" / "decs_pgm_fixedpv.pt"
-DEFAULT_INSTANCE_INDEX = 1966
+# K=100 PGM example: WD-CSNG is feasible (2/100), while CSNG reaches
+# 100/100 feasibility and its best cost remains within 1% of D-NN.
+DEFAULT_INSTANCE_INDEX = 4781
 DEFAULT_CHECKPOINTS = {
     "d_nn": ROOT / "Neural_network" / "deterministic_tcn.pt",
     "s_csng": ROOT / "Neural_network" / "generator_tcn_s_csng.pt",
@@ -79,9 +81,22 @@ METHOD_COLORS = {
 
 def configure_plot_style() -> None:
     """Apply an IEEE single-column, colorblind-safe plotting style."""
+    try:
+        font_manager.findfont("Times New Roman", fallback_to_default=False)
+    except ValueError as error:
+        raise RuntimeError(
+            "Times New Roman is required for the IEEE TSG figure but is not installed."
+        ) from error
     plt.rcParams.update({
-        "font.family": "serif",
-        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "font.family": "Times New Roman",
+        "font.serif": ["Times New Roman"],
+        "mathtext.fontset": "custom",
+        "mathtext.rm": "Times New Roman",
+        "mathtext.it": "Times New Roman:italic",
+        "mathtext.bf": "Times New Roman:bold",
+        "mathtext.sf": "Times New Roman",
+        "mathtext.tt": "Times New Roman",
+        "mathtext.fallback": None,
         "font.size": 8,
         "axes.labelsize": 8.5,
         "axes.titlesize": 8.5,
@@ -90,8 +105,6 @@ def configure_plot_style() -> None:
         "legend.fontsize": 8,
         "axes.linewidth": 0.7,
         "lines.linewidth": 1.1,
-        "pdf.fonttype": 42,
-        "ps.fonttype": 42,
         "savefig.facecolor": "white",
     })
 
@@ -397,8 +410,32 @@ def assess_schedules_with_pgm(
     pgm_error_tolerance: float,
     max_pf_iterations: int,
     threading: int,
-) -> dict[str, dict[str, np.ndarray | float]]:
-    """Evaluate all neural candidates and the IPOPT schedule by native PGM."""
+    fixed_pv_chunk_size: int,
+    device: torch.device,
+) -> dict[str, dict[str, np.ndarray | float | int]]:
+    """Evaluate all schedules while isolating individual PGM batch failures.
+
+    Parameters
+    ----------
+    schedules : dict[str, np.ndarray]
+        Neural schedules, with one row per candidate.
+    ipopt_schedule : np.ndarray
+        Reference free-variable trajectory with shape ``(T,F)``.
+    current_load, future_load : np.ndarray
+        Current and scenario-dependent future loads in MW/Mvar.
+    ramp_fraction : float
+        Symmetric ramp limit as a fraction of generator Pmax.
+    feasibility_tolerance, balance_tolerance_mva : float
+        Constraint tolerance and nodal-balance tolerance in MVA.
+    pgm_error_tolerance : float
+        Native PGM Newton convergence tolerance.
+    max_pf_iterations, threading : int
+        PGM iteration limit and worker setting.
+    fixed_pv_chunk_size : int
+        Maximum float64 fixed-PV Newton points processed together.
+    device : torch.device
+        Device used by the fixed-PV Newton calculation.
+    """
     case = load_case118()
     scenarios, future_steps = future_load.shape[:2]
     horizon = future_steps + 1
@@ -417,11 +454,19 @@ def assess_schedules_with_pgm(
             pgm_error_tolerance=pgm_error_tolerance,
             pgm_max_iterations=max_pf_iterations,
             threading=threading,
+            continue_on_batch_error=True,
+            fixed_pv_chunk_size=fixed_pv_chunk_size,
+            fixed_pv_device=str(device),
         )
         assessed = assess_candidate_batch(
             case, loads, states, len(values), scenarios, horizon,
             ramp_fraction, feasibility_tolerance, balance_tolerance_mva,
         )
+        point_success = np.asarray(states["batch_success"]).reshape(
+            len(values), -1,
+        )
+        failed_batch_points = int(np.count_nonzero(~point_success))
+        failed_candidates = int(np.count_nonzero(~point_success.all(axis=1)))
         assessments[name] = {
             "feasible": np.asarray(assessed["feasible"], dtype=bool),
             "objective": np.asarray(assessed["objective"], dtype=float),
@@ -429,7 +474,15 @@ def assess_schedules_with_pgm(
                 assessed["maximum_violation"], dtype=float,
             ),
             "pgm_seconds": float(states["t_total"]),
+            "pgm_failed_batch_points": failed_batch_points,
+            "pgm_failed_candidates": failed_candidates,
         }
+        print(
+            f"{METHOD_LABELS.get(name, 'IPOPT')}: PGM failed points "
+            f"{failed_batch_points}/{len(loads)}, affected candidates "
+            f"{failed_candidates}/{len(values)}",
+            flush=True,
+        )
     return assessments
 
 
@@ -476,12 +529,23 @@ def plot_dispatch_distributions(
     schedules: dict[str, np.ndarray],
     assessments: dict[str, dict[str, np.ndarray | float]],
     png_path: Path,
-    pdf_path: Path,
-    tiff_path: Path,
-    dpi: int,
-    validation_backend: str,
 ) -> dict[str, dict[str, float | int | None]]:
-    """Render the two-panel diversity, feasibility, and economy figure."""
+    """Render and save the two-panel dispatch comparison.
+
+    Parameters
+    ----------
+    schedules : dict[str, ndarray]
+        D-NN and generator schedules used to compute pairwise diversity.
+    assessments : dict[str, dict]
+        Per-candidate feasibility and objective arrays from the selected backend.
+    png_path : pathlib.Path
+        Final 3.5-inch, 400-dpi PNG destination.
+
+    Returns
+    -------
+    dict
+        Per-method diversity, feasibility, and best-cost statistics.
+    """
     configure_plot_style()
     methods = ("d_nn", "s_csng", "wd_csng", "csng")
     distances = normalized_pairwise_distances(schedules)
@@ -525,7 +589,7 @@ def plot_dispatch_distributions(
     diversity_axis.set_ylim(bottom=-0.008)
     diversity_axis.grid(axis="y", color="#D9D9D9", linewidth=0.45, alpha=0.75)
     diversity_axis.text(
-        0.5, -0.35, "(a) Diversity",
+        0.5, -0.32, "(a) Diversity",
         transform=diversity_axis.transAxes,
         ha="center", va="top", fontsize=8.5,
     )
@@ -565,28 +629,10 @@ def plot_dispatch_distributions(
     quality_axis.margins(y=0.14)
     quality_axis.grid(axis="y", color="#D9D9D9", linewidth=0.45, alpha=0.75)
     quality_axis.text(
-        0.5, -0.35, "(b) Solution quality",
+        0.5, -0.32, "(b) Solution quality",
         transform=quality_axis.transAxes,
         ha="center", va="top", fontsize=8.5,
     )
-    legend_handles = [
-        Line2D([0], [0], marker="o", linestyle="none", markerfacecolor="#777777",
-               markeredgecolor="white", markersize=4.5,
-               label=f"Feasible"),
-        Line2D([0], [0], marker="o", linestyle="none", markerfacecolor="white",
-               markeredgecolor="#C91313", markersize=4.5, label="Infeasible"),
-        Line2D([0], [0], marker="*", linestyle="none", markerfacecolor="#777777",
-               markeredgecolor="#111111", markersize=7, label="Best"),
-        Line2D([0], [0], color="#111111", linestyle="--", linewidth=0.9,
-               label="IPOPT"),
-    ]
-    # figure.legend(
-    #     handles=[
-    #         *legend_handles,
-    #     ],
-    #     loc="upper center", bbox_to_anchor=(0.5, 0.995), ncol=4,
-    #     frameon=False, columnspacing=0.72, handletextpad=0.35,
-    # )
     for axis in (diversity_axis, quality_axis):
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
@@ -597,14 +643,10 @@ def plot_dispatch_distributions(
         )
 
     figure.subplots_adjust(
-        left=0.145, right=0.99, top=0.88, bottom=0.29, wspace=0.50,
+        left=0.145, right=0.99, top=0.98, bottom=0.29, wspace=0.50,
     )
     png_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(png_path, dpi=dpi)
-    figure.savefig(pdf_path)
-    figure.savefig(
-        tiff_path, dpi=dpi, pil_kwargs={"compression": "tiff_lzw"},
-    )
+    figure.savefig(png_path, dpi=400)
     plt.close(figure)
 
     metrics: dict[str, dict[str, float | int | None]] = {}
@@ -615,6 +657,12 @@ def plot_dispatch_distributions(
         metrics[name] = {
             "candidates": int(len(objective)),
             "feasible_candidates": int(feasible.sum()),
+            "pgm_failed_batch_points": int(
+                assessments[name].get("pgm_failed_batch_points", 0)
+            ),
+            "pgm_failed_candidates": int(
+                assessments[name].get("pgm_failed_candidates", 0)
+            ),
             "pairwise_distance_median": float(np.median(distances[name])),
             "pairwise_distance_p95": float(np.quantile(distances[name], 0.95)),
             "best_feasible_cost": (
@@ -655,7 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--candidates", type=int, default=50,
+        "--candidates", type=int, default=100,
         help="common latent samples generated by each stochastic network",
     )
     parser.add_argument(
@@ -696,7 +744,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir", type=Path, default=DEFAULT_OUTPUT,
-        help="directory for PNG, PDF, TIFF, NPZ, and JSON outputs",
+        help="directory for the final PNG, raw NPZ, and JSON metadata",
     )
     parser.add_argument(
         "--feasibility-tolerance", type=float, default=1e-4,
@@ -715,12 +763,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum native PGM Newton iterations",
     )
     parser.add_argument(
-        "--threading", type=int, default=0,
-        help="PGM workers: negative is sequential, zero uses all hardware threads",
+        "--fixed-pv-chunk-size", type=int, default=1024,
+        help="maximum fixed-PV Newton points per float64 dense batch",
     )
     parser.add_argument(
-        "--dpi", type=int, default=600,
-        help="PNG and TIFF resolution in dots per inch",
+        "--threading", type=int, default=0,
+        help="PGM workers: negative is sequential, zero uses all hardware threads",
     )
     parser.add_argument(
         "--device", choices=("auto", "cpu", "cuda"), default="auto",
@@ -732,9 +780,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """Generate comparable schedules, resolve IPOPT, and save the figure."""
     args = build_parser().parse_args()
-    if args.candidates < 2 or args.dpi < 300 or args.max_pf_iterations < 1:
+    if (
+        args.candidates < 2
+        or args.max_pf_iterations < 1
+        or args.fixed_pv_chunk_size < 1
+    ):
         raise ValueError(
-            "candidates must be at least two, dpi at least 300, and iterations positive"
+            "candidates must be at least two and solver iteration/chunk sizes positive"
         )
     if (
         args.feasibility_tolerance < 0
@@ -834,6 +886,8 @@ def main() -> None:
             args.pgm_error_tolerance,
             args.max_pf_iterations,
             args.threading,
+            args.fixed_pv_chunk_size,
+            device,
         )
     else:
         assessments = assess_schedules_with_decs(
@@ -851,13 +905,10 @@ def main() -> None:
         f"_instance_{instance_index}"
     )
     png_path = args.output_dir / f"{stem}.png"
-    pdf_path = args.output_dir / f"{stem}.pdf"
-    tiff_path = args.output_dir / f"{stem}.tiff"
     npz_path = args.output_dir / f"{stem}.npz"
     json_path = args.output_dir / f"{stem}.json"
     metrics = plot_dispatch_distributions(
-        schedules, assessments, png_path, pdf_path, tiff_path, args.dpi,
-        args.validation_backend,
+        schedules, assessments, png_path,
     )
     assessment_payload = {}
     for name, values in assessments.items():
@@ -897,8 +948,6 @@ def main() -> None:
         "checkpoints": {name: str(path.resolve()) for name, path in paths.items()},
         "outputs": {
             "png": str(png_path.resolve()),
-            "pdf": str(pdf_path.resolve()),
-            "tiff": str(tiff_path.resolve()),
             "npz": str(npz_path.resolve()),
         },
     }
@@ -910,8 +959,6 @@ def main() -> None:
     )
     print(f"IPOPT reference: {ipopt_source}")
     print(f"saved figure: {png_path}")
-    print(f"saved vector figure: {pdf_path}")
-    print(f"saved TIFF figure: {tiff_path}")
     print(f"saved raw schedules: {npz_path}")
     print(f"saved metadata: {json_path}")
 

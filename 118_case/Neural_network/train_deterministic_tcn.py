@@ -214,9 +214,14 @@ def compute_batch(
         batch, 1, scenarios, horizon, physics.n_gen,
     )
     objective = expected_generation_objective(scenario_pg, completion)
+    strict_feasibility_loss = maximum_violation.mean()
+    optimization_feasibility_loss = (
+        feasibility_loss
+        + args.lambda_max_violation * strict_feasibility_loss
+    )
     loss, normalized_objective = direct_objective_penalty_loss(
         objective,
-        feasibility_loss,
+        optimization_feasibility_loss,
         args.objective_cost_scale,
         args.lambda_objective,
         args.lambda_fea,
@@ -227,7 +232,9 @@ def compute_batch(
     metrics = {
         "loss": loss.detach(),
         "objective_normalized": normalized_objective.detach(),
-        "fea": feasibility_loss.detach(),
+        "fea": optimization_feasibility_loss.detach(),
+        "hierarchical_fea": feasibility_loss.detach(),
+        "strict_fea": strict_feasibility_loss.detach(),
         "schedule_violation": schedule_violation.mean().detach(),
         "feasible": feasible.float().mean().detach(),
         "max_violation": maximum_violation.mean().detach(),
@@ -284,7 +291,8 @@ def run_epoch(
     model.train(training)
     completion.eval()
     names = (
-        "loss", "objective_normalized", "fea", "schedule_violation", "feasible",
+        "loss", "objective_normalized", "fea", "hierarchical_fea", "strict_fea",
+        "schedule_violation", "feasible",
         "max_violation", "violation_pg", "violation_qg", "violation_voltage",
         "violation_angle", "violation_thermal", "violation_ramp", "cost_mean",
         "pf_residual",
@@ -390,6 +398,14 @@ def print_epoch_metrics(
             f"penalty={values['fea']:.3e} weighted={weighted_penalty:.3e}",
             flush=True,
         )
+        if args.lambda_max_violation > 0:
+            print(
+                f"  {split:10s} penalty parts: hierarchical="
+                f"{values['hierarchical_fea']:.3e} + "
+                f"{args.lambda_max_violation:.3g}*trajectory_max="
+                f"{values['strict_fea']:.3e}",
+                flush=True,
+            )
         print(
             f"  {split:10s} cost mean={values['cost_mean']:.3f} "
             f"feasible_mean={feasible_cost_text} | feasible={values['feasible']:.3f} "
@@ -414,7 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--data", type=Path,
-        default=ROOT / "Data_generation" / "data" / "e2e118_N10000_S20_T16",
+        default=ROOT / "Data_generation" / "data" / "e2e118_N5000_S20_T16",
         help="SMPC dataset containing pooled conditions and full load scenarios",
     )
     parser.add_argument(
@@ -432,11 +448,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum number of direct objective-plus-penalty training epochs",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=8,
+        "--batch-size", type=int, default=32,
         help="IEEE-118 SMPC scenario-tree instances per gradient update",
     )
     parser.add_argument(
-        "--hidden-channels", type=int, default=256,
+        "--hidden-channels", type=int, default=128,
         help="input-embedding and temporal-block feature width",
     )
     parser.add_argument(
@@ -452,16 +468,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="symmetric one-period ramp limit as a fraction of generator Pmax",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=1e-4,
+        "--learning-rate", type=float, default=2e-4,
         help="Adam learning rate used for all epochs",
     )
     parser.add_argument(
-        "--lambda-objective", type=float, default=1e-2,
+        "--lambda-objective", type=float, default=4e-3,
         help="weight of the normalized direct SMPC generation objective",
     )
     parser.add_argument(
-        "--lambda-fea", type=float, default=5e-2,
-        help="weight of the reference hierarchical mean-CVaR violation penalty",
+        "--lambda-fea", type=float, default=0.5,
+        help=(
+            "weight of the single-trajectory hierarchical mean-CVaR violation "
+            "penalty; the default allows a controlled feasibility/economy tradeoff"
+        ),
+    )
+    parser.add_argument(
+        "--lambda-max-violation", type=float, default=0.0,
+        help=(
+            "additional weight on each trajectory's maximum normalized violation; "
+            "zero exactly preserves the reference hierarchical penalty"
+        ),
     )
     parser.add_argument(
         "--objective-cost-scale", type=float, default=0.0, metavar="COST",
@@ -471,11 +497,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--mean-cvar-alpha", type=float, default=0.1,
+        "--mean-cvar-alpha", type=float, default=0.05,
         help="mean weight alpha_c in (0,1); the remainder weights upper-tail CVaR",
     )
     parser.add_argument(
-        "--cvar-tail-fraction", type=float, default=0.1,
+        "--cvar-tail-fraction", type=float, default=0.05,
         help="largest residual fraction rho_c averaged in every constraint family",
     )
     parser.add_argument(
@@ -483,7 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="reporting-only maximum normalized violation for feasibility",
     )
     parser.add_argument(
-        "--patience", type=int, default=50,
+        "--patience", type=int, default=100,
         help="stale validation epochs before early stopping",
     )
     parser.add_argument(
@@ -536,7 +562,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
     if not 0 < args.cvar_tail_fraction <= 1:
         raise ValueError("cvar_tail_fraction must lie in (0,1]")
     if min(
-        args.lambda_objective, args.lambda_fea, args.feasibility_tolerance,
+        args.lambda_objective, args.lambda_fea, args.lambda_max_violation,
+        args.feasibility_tolerance,
         args.min_delta, args.max_grad_norm, args.num_workers,
     ) < 0:
         raise ValueError("loss weights, tolerances, and worker count must be nonnegative")
@@ -700,6 +727,11 @@ def main() -> None:
         f"+ {args.lambda_fea:.3e}*L_fea | alpha={args.mean_cvar_alpha:.2f}, "
         f"rho={args.cvar_tail_fraction:.2f}"
     )
+    if args.lambda_max_violation > 0:
+        print(
+            "  L_fea=L_hierarchical + "
+            f"{args.lambda_max_violation:g}*mean(trajectory maximum violation)"
+        )
     print(f"  objective cost scale source: {cost_scale_source}")
     print(
         f"  ramp={100 * args.ramp_fraction:.1f}% Pmax/period, "
@@ -750,10 +782,15 @@ def main() -> None:
             "sum all-generator cost over time per scenario, including reconstructed "
             "slack Pg, then average over scenarios"
         ),
-        "loss_definition": "direct_objective_plus_hierarchical_mean_cvar_penalty",
+        "loss_definition": (
+            "direct_objective_plus_hierarchical_mean_cvar_penalty"
+            if args.lambda_max_violation == 0
+            else "direct_objective_plus_hierarchical_and_trajectory_max_penalties"
+        ),
         "loss_hyperparameters": {
             "lambda_objective": args.lambda_objective,
             "lambda_fea": args.lambda_fea,
+            "lambda_max_violation": args.lambda_max_violation,
             "objective_cost_scale": args.objective_cost_scale,
             "objective_cost_scale_source": cost_scale_source,
             "mean_cvar_alpha": args.mean_cvar_alpha,

@@ -22,11 +22,14 @@ future_pool : (N, 3, T-1, n_load_bus, 2)
 """
 
 import argparse
+import gc
 import json
+import shutil
 import sys
 import tempfile
+import warnings
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 
 import numpy as np
 from numpy.lib.format import open_memmap
@@ -64,11 +67,85 @@ def prepare_staged_output(final_output: Path) -> tuple[Path, Path]:
     return final_output, staged_output
 
 
+def file_size_manifest(directory: Path) -> dict[str, int]:
+    """Return relative file paths and sizes for a dataset directory.
+
+    Parameters
+    ----------
+    directory : pathlib.Path
+        Existing dataset directory to inspect recursively.
+
+    Returns
+    -------
+    dict[str, int]
+        Mapping from POSIX-style relative paths to file sizes in bytes.
+    """
+    return {
+        path.relative_to(directory).as_posix(): path.stat().st_size
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
 def publish_staged_output(staged_output: Path, final_output: Path) -> None:
-    """Atomically rename a completed staged dataset to its final directory."""
+    """Publish a completed dataset despite transient Windows directory locks.
+
+    Parameters
+    ----------
+    staged_output : pathlib.Path
+        Completed sibling directory whose files are fully closed.
+    final_output : pathlib.Path
+        New final dataset path; it must not already exist.
+
+    Notes
+    -----
+    The preferred operation is an atomic sibling-directory rename. If Windows
+    still denies that rename after all retries, the completed files are copied
+    to a newly created final directory and checked against a size manifest.
+    """
     if final_output.exists():
         raise FileExistsError(f"output appeared during generation: {final_output}")
-    staged_output.replace(final_output)
+    attempts = 10 if sys.platform == "win32" else 1
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            staged_output.replace(final_output)
+            return
+        except PermissionError as error:
+            last_error = error
+            if final_output.exists():
+                raise FileExistsError(
+                    f"output appeared during generation: {final_output}"
+                )
+            if attempt + 1 < attempts:
+                # Large memmap files can remain briefly locked by Windows or an
+                # antivirus scanner even after their Python handles are closed.
+                gc.collect()
+                sleep(1.0)
+
+    if sys.platform != "win32":
+        raise last_error
+
+    source_manifest = file_size_manifest(staged_output)
+    try:
+        shutil.copytree(staged_output, final_output)
+        if file_size_manifest(final_output) != source_manifest:
+            raise OSError("copied dataset does not match the staged file manifest")
+    except Exception:
+        # The final directory was created only by this failed copy attempt.
+        if final_output.exists():
+            shutil.rmtree(final_output)
+        raise
+
+    try:
+        shutil.rmtree(staged_output)
+    except OSError as error:
+        warnings.warn(
+            f"dataset was saved successfully, but temporary directory "
+            f"{staged_output} could not be removed: {error}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 def pool_scenarios(future_load: np.ndarray) -> np.ndarray:
@@ -149,7 +226,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--n-instances", type=int, default=10000, metavar="N",
+        "--n-instances", type=int, default=5000, metavar="N",
         help="场景树的数量",
     )
     parser.add_argument(
@@ -161,19 +238,19 @@ def main() -> None:
         help="论文预测域总时段数 T；t=1 确定，t=2,...,T 为未来场景",
     )
     parser.add_argument(
-        "--forecast-deviation", type=float, default=0.15, metavar="D",
+        "--forecast-deviation", type=float, default=0.08, metavar="D",
         help="tanh预测误差相对日内曲线的最大幅度，取值范围[0,1)",
     )
     parser.add_argument(
-        "--load-scale-min", type=float, default=0.85, metavar="LOWER",
+        "--load-scale-min", type=float, default=0.75, metavar="LOWER",
         help="节点负荷相对PGLib基准值的保守非对称绝对下界",
     )
     parser.add_argument(
-        "--load-scale-max", type=float, default=1.15, metavar="UPPER",
+        "--load-scale-max", type=float, default=1.05, metavar="UPPER",
         help="节点负荷相对PGLib基准值的保守非对称绝对上界",
     )
     parser.add_argument(
-        "--rho", type=float, default=0.82, metavar="RHO",
+        "--rho", type=float, default=0.95, metavar="RHO",
         help="未来预测误差的 AR(1) 时间相关系数",
     )
     parser.add_argument(
@@ -340,6 +417,9 @@ def main() -> None:
         array.flush()
         # Windows 不允许在活动 memmap 句柄下重命名其父目录。
         array._mmap.close()
+    data.clear()
+    del array
+    gc.collect()
     publish_staged_output(args.output, final_output)
     print(f"Saved SMPC base dataset to {final_output}")
 

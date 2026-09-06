@@ -1,0 +1,106 @@
+{
+  "method": "CSNG + PGM batch with fixed-PV high-voltage fallback",
+  "benchmark": "csng",
+  "projection_method": "inward_clip_v1",
+  "diversity_loss_enabled": true,
+  "power_grid_model_version": "1.13.154",
+  "checkpoint": "D:\\desk\\TBSI\\2026_8_generative_SMPC\\code\\118_case\\Neural_network\\generator_tcn_clip.pt",
+  "data_split": "test",
+  "n_instances": 200,
+  "candidates_per_instance": 10,
+  "native_batch_points_per_instance": 3010,
+  "fixed_pv_formulation": "float64 full Newton high-voltage state + native PGM PQ batch; native failures or different solution branches use the fixed-PV state",
+  "fixed_pv_device": "cuda",
+  "fixed_pv_chunk_size": 1024,
+  "feasible_instances": 200,
+  "feasibility_rate": 1.0,
+  "inference_warmup_seconds": 5.537118599982932,
+  "time_seconds": {
+    "mean": 1.7420006784971338,
+    "median": 1.7466504499898292,
+    "p95": 1.7976517900067845
+  },
+  "generation_seconds": {
+    "mean": 0.009465080999652854,
+    "median": 0.009053250018041581,
+    "p95": 0.012588460010010748
+  },
+  "pgm_batch_seconds": {
+    "mean": 1.4333770450015435,
+    "median": 1.4332991499977652,
+    "p95": 1.4729434700129787
+  },
+  "pgm_prepare_seconds": {
+    "mean": 0.9906215835004696,
+    "median": 0.9805804000061471,
+    "p95": 1.0164701099944067
+  },
+  "pgm_power_flow_seconds": {
+    "mean": 0.16972909699979938,
+    "median": 0.17104005001601763,
+    "p95": 0.19128551997418974
+  },
+  "pgm_extract_seconds": {
+    "mean": 0.27299709850078213,
+    "median": 0.27702909999061376,
+    "p95": 0.2941783399757696
+  },
+  "pgm_failed_batch_points": {
+    "mean": 11.445,
+    "median": 4.0,
+    "p95": 43.04999999999998
+  },
+  "pgm_failed_candidates": {
+    "mean": 1.225,
+    "median": 1.0,
+    "p95": 4.0
+  },
+  "native_pgm_wrong_branch_points": {
+    "mean": 3.925,
+    "median": 0.0,
+    "p95": 23.099999999999966
+  },
+  "fixed_pv_fallback_points": {
+    "mean": 15.37,
+    "median": 4.5,
+    "p95": 67.34999999999988
+  },
+  "final_failed_batch_points": {
+    "mean": 0.0,
+    "median": 0.0,
+    "p95": 0.0
+  },
+  "fixed_pv_newton_seconds": {
+    "mean": 0.964574212001462,
+    "median": 0.9538834000122733,
+    "p95": 0.9896547449898206
+  },
+  "constraint_evaluation_seconds": {
+    "mean": 0.2991585524959373,
+    "median": 0.3016238499840256,
+    "p95": 0.3238698600238422
+  },
+  "best_cost": {
+    "mean": 1587554.2075892584,
+    "median": 1616430.1542707256,
+    "p95": 1699008.31202069
+  },
+  "feasible_solution_cost": {
+    "mean": 1587554.2075892584,
+    "median": 1616430.1542707256,
+    "p95": 1699008.31202069
+  },
+  "all_solution_cost": {
+    "mean": 1587554.2075892584,
+    "median": 1616430.1542707256,
+    "p95": 1699008.31202069
+  },
+  "cost_available_instances": 200,
+  "cost_unavailable_instances": 0,
+  "pandapower_equivalence_passed": null,
+  "ramp_fraction_of_pmax": 0.25,
+  "feasibility_tolerance": 0.0001,
+  "balance_tolerance_mva": 1e-05,
+  "pgm_error_tolerance": 1e-08,
+  "seed": 2026
+}

@@ -594,6 +594,44 @@ def economic_warmup_weight(
     return float(target_weight * progress)
 
 
+def build_plateau_scheduler(
+    optimizer: torch.optim.Optimizer,
+    factor: float,
+    patience: int,
+    min_delta: float,
+    min_learning_rate: float,
+) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
+    """Build the validation-loss scheduler shared by both training stages.
+
+    Parameters
+    ----------
+    optimizer : torch.optim.Optimizer
+        Stage-specific Adam optimizer whose learning rate is adjusted.
+    factor : float
+        Multiplicative learning-rate reduction in ``(0, 1)``.
+    patience : int
+        Validation epochs without sufficient improvement before one reduction.
+    min_delta : float
+        Absolute validation-loss improvement required to reset the plateau count.
+    min_learning_rate : float
+        Positive lower bound for the stage learning rate.
+
+    Returns
+    -------
+    torch.optim.lr_scheduler.ReduceLROnPlateau
+        Scheduler configured to minimize validation total loss.
+    """
+    return torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=factor,
+        patience=patience,
+        threshold=min_delta,
+        threshold_mode="abs",
+        min_lr=min_learning_rate,
+    )
+
+
 def expected_generation_objective(
     scenario_pg: torch.Tensor,
     completion: DifferentiableEqualityCompletion,
@@ -818,6 +856,8 @@ def compute_batch(
         "violation_ramp": shaped_families["ramp"].mean().detach(),
         "cost_mean": objective.mean().detach(),
         "cost_best": objective.amin(dim=1).mean().detach(),
+        # Diagnostic only: mean over operating points of the worst normalized
+        # nodal P/Q mismatch. It is not currently part of the training loss.
         "pf_residual": state["pf_residual"].mean().detach(),
         "best_cost_sum": torch.where(
             has_feasible, best_feasible_cost, torch.zeros_like(best_feasible_cost),
@@ -1118,7 +1158,7 @@ def build_parser(benchmark: str = "csng") -> argparse.ArgumentParser:
         description=f"Train the {spec['method']} non-causal TCN generator.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    N_train = 10000
+    N_train = 5000
     S_num = 20
     T_horizon = 16
     parser.add_argument(
@@ -1141,24 +1181,26 @@ def build_parser(benchmark: str = "csng") -> argparse.ArgumentParser:
         default=Path(__file__).resolve().parent / str(spec["stage1_checkpoint"]),
         help="separate checkpoint for the best stage-one model",
     )
-    parser.add_argument("--epochs", type=int, default=500, help="maximum epochs across both training stages")
+    parser.add_argument("--epochs", type=int, default=700, help="maximum epochs across both training stages")
     parser.add_argument(
-        "--stage1-epochs", type=int, default=40,
+        "--stage1-epochs", type=int, default=80,
         help=(
-            "feasibility/diversity epochs before economic shaping"
+            "feasibility/diversity epochs before economic shaping; the IEEE-118 "
+            "formal default is longer than the 20-epoch pilot"
             if diversity_enabled else
-            "feasibility-only epochs before economic shaping"
+            "feasibility-only epochs before economic shaping; the IEEE-118 "
+            "formal default is longer than the 20-epoch pilot"
         ),
     )
     parser.add_argument(
-        "--batch-size", type=int, default=1,
+        "--batch-size", type=int, default=12,
         help=(
             "IEEE-118 SMPC instances per gradient update; one instance already "
             "expands to K*S*T=16000 AC operating points at paper defaults"
         ),
     )
     parser.add_argument(
-        "--gradient-accumulation-steps", type=int, default=8, metavar="STEPS",
+        "--gradient-accumulation-steps", type=int, default=1, metavar="STEPS",
         help=(
             "micro-batches averaged before one Adam update; raises the effective "
             "IEEE-118 batch size without storing several 16000-point graphs"
@@ -1169,15 +1211,15 @@ def build_parser(benchmark: str = "csng") -> argparse.ArgumentParser:
         help="trajectory-level latent candidates per instance; at least two",
     )
     parser.add_argument(
-        "--hidden-channels", type=int, default=256,
+        "--hidden-channels", type=int, default=64,
         help="input-embedding and temporal-block feature width",
     )
     parser.add_argument(
-        "--latent-dim", type=int, default=32,
+        "--latent-dim", type=int, default=16,
         help="dimension of one Gaussian latent vector per trajectory",
     )
     parser.add_argument(
-        "--latent-embedding-dim", type=int, default=64,
+        "--latent-embedding-dim", type=int, default=32,
         help="latent feature width repeated over the horizon",
     )
     parser.add_argument(
@@ -1193,44 +1235,88 @@ def build_parser(benchmark: str = "csng") -> argparse.ArgumentParser:
         help="symmetric one-period ramp limit as a fraction of generator Pmax",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=1e-4,
-        help="Adam learning rate for Stage 1",
+        "--learning-rate", type=float, default=2.5e-4,
+        help="Adam learning rate for the 80-epoch Stage 1",
     )
     parser.add_argument(
         "--stage2-learning-rate", type=float, default=5e-5,
-        help="Adam learning rate for Stage-2 economic shaping",
+        help="conservative Adam learning rate for Stage-2 economic shaping",
     )
     parser.add_argument(
-        "--lambda-fea", type=float, default=5e-2,
+        "--lr-scheduler", choices=("none", "plateau"), default="plateau",
         help=(
-            "weight of equation (28)'s summed hierarchical feasibility loss; "
-            "emphasizes strict feasibility for K=50, S=20, and T=16"
+            "adaptive learning-rate schedule; plateau monitors validation total "
+            "loss and is paused during the Stage-2 economic warmup"
         ),
     )
     parser.add_argument(
-        "--lambda-eco", type=float, default=1e-2,
+        "--lr-decay-factor", type=float, default=0.5,
+        help="multiplicative learning-rate reduction used in both stages",
+    )
+    parser.add_argument(
+        "--stage1-lr-decay-patience", type=int, default=4,
+        help="Stage-1 validation plateau epochs before reducing its learning rate",
+    )
+    parser.add_argument(
+        "--stage2-lr-decay-patience", type=int, default=25,
+        help="post-warmup Stage-2 plateau epochs before reducing its learning rate",
+    )
+    parser.add_argument(
+        "--lr-min-delta", type=float, default=1e-5,
+        help="absolute validation-loss improvement required by both LR schedulers",
+    )
+    parser.add_argument(
+        "--stage1-min-learning-rate", type=float, default=2.5e-5,
+        help="positive lower learning-rate bound for Stage 1",
+    )
+    parser.add_argument(
+        "--stage2-min-learning-rate", type=float, default=1e-5,
+        help="positive lower learning-rate bound for Stage 2",
+    )
+    parser.add_argument(
+        "--lambda-fea", type=float, default=2e-2,
         help=(
-            "target weight of the normalized stage-two economic loss; with a "
-            "the automatically frozen IEEE-118 cost scale keeps this dimensionless"
+            "weight of equation (28)'s summed hierarchical feasibility loss; "
+            "with K=50, the default gives unit weight to the mean candidate "
+            "violation before diversity and economic shaping"
+        ),
+    )
+    parser.add_argument(
+        "--lambda-eco", type=float, default=3e-3,
+        help=(
+            "target weight of the normalized stage-two economic loss; the "
+            "automatically frozen IEEE-118 cost scale keeps this dimensionless; "
+            "the conservative default limits feasibility regression"
         ),
     )
     if diversity_enabled:
         parser.add_argument(
-            "--lambda-div", type=float, default=4e-2,
+            "--lambda-div", type=float, default=1e-1,
             help="weight of feasibility-aware whole-trajectory diversity",
         )
     else:
         parser.set_defaults(lambda_div=0.0)
+
+    if diversity_enabled:
+        parser.add_argument(
+            "--sigma-div", type=float, default=0.1,
+            help=(
+                "Gaussian width applied to the dimension-mean squared distance "
+                "in normalized free-variable space"
+            ),
+        )
+    else:
+        parser.set_defaults(sigma_div=0.5)
     parser.add_argument(
-        "--economic-warmup-epochs", type=int, default=20,
+        "--economic-warmup-epochs", type=int, default=60,
         help="Stage-2 epochs used to increase lambda_eco linearly from zero",
     )
     parser.add_argument(
-        "--mean-cvar-alpha", type=float, default=0.1,
+        "--mean-cvar-alpha", type=float, default=0.05,
         help="alpha_c in (0,1): mean weight; smaller values emphasize tail violations",
     )
     parser.add_argument(
-        "--cvar-tail-fraction", type=float, default=0.1,
+        "--cvar-tail-fraction", type=float, default=0.05,
         help="rho_c in (0,1]: largest residual fraction averaged by empirical CVaR",
     )
 
@@ -1249,29 +1335,20 @@ def build_parser(benchmark: str = "csng") -> argparse.ArgumentParser:
             "reactive-power boundary"
         ),
     )
-    if diversity_enabled:
-        parser.add_argument(
-            "--sigma-div", type=float, default=0.5,
-            help=(
-                "Gaussian width applied to the dimension-mean squared distance "
-                "in normalized free-variable space"
-            ),
-        )
-    else:
-        parser.set_defaults(sigma_div=0.5)
+
     parser.add_argument(
-        "--gamma-eco", type=float, default=1.0,
+        "--gamma-eco", type=float, default=5.0,
         help="nonnegative infeasible-cost amplification gamma_eco in equation (32)",
     )
     parser.add_argument(
-        "--alpha-eco", type=float, default=0.5,
+        "--alpha-eco", type=float, default=0.05,
         help=(
             "alpha_eco in (0,1): weight of the all-candidate economic mean; "
             "1-alpha_eco weights the best-K_b candidate mean in equation (32)"
         ),
     )
     parser.add_argument(
-        "--economic-top-k", type=int, default=5, metavar="K_B",
+        "--economic-top-k", type=int, default=1, metavar="K_B",
         help=(
             "K_b in equation (32): candidates with the lowest feasibility-adjusted "
             "cost retained in the best-subset economic term; must not exceed candidates"
@@ -1347,7 +1424,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
     positive_ints = (
         args.epochs, args.batch_size, args.hidden_channels, args.latent_dim,
         args.latent_embedding_dim, args.patience, args.economic_warmup_epochs,
-        args.gradient_accumulation_steps,
+        args.gradient_accumulation_steps, args.stage1_lr_decay_patience,
+        args.stage2_lr_decay_patience,
     )
     if min(positive_ints) < 1:
         raise ValueError("epochs, dimensions, batch size, and patience must be positive")
@@ -1365,10 +1443,18 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("ramp_fraction must lie in (0, 1]")
     positive_floats = (
         args.learning_rate, args.stage2_learning_rate,
+        args.stage1_min_learning_rate, args.stage2_min_learning_rate,
         args.tau_feas, args.sigma_div,
     )
     if min(positive_floats) <= 0:
         raise ValueError("learning rate, feasibility temperature, and diversity width must be positive")
+    if (
+        args.stage1_min_learning_rate > args.learning_rate
+        or args.stage2_min_learning_rate > args.stage2_learning_rate
+    ):
+        raise ValueError("minimum learning rate must not exceed its stage initial rate")
+    if not 0 < args.lr_decay_factor < 1:
+        raise ValueError("lr_decay_factor must lie in (0,1)")
     if not 0 < args.mean_cvar_alpha < 1:
         raise ValueError("mean_cvar_alpha must lie in (0,1)")
     if not 0 < args.alpha_eco < 1:
@@ -1380,6 +1466,7 @@ def validate_arguments(args: argparse.Namespace) -> None:
     if min(
         args.lambda_fea, args.lambda_div, args.lambda_eco,
         args.gamma_eco, args.min_delta, args.economic_min_delta,
+        args.lr_min_delta,
     ) < 0:
         raise ValueError(
             "loss weights, gamma_eco, min_delta, and economic_min_delta "
@@ -1489,8 +1576,17 @@ def main(benchmark: str = "csng") -> None:
             "range, not empirical current/future samples"
         )
     source_metadata = decs_metadata.get("source_base_metadata", {})
-    for field in ("dataset_type", "case_name", "n_instances", "n_scenarios", "horizon", "seed"):
+    # DECS uses the source dataset only to define the absolute load-scale domain.
+    # Its sample count, scenario count, and horizon need not equal the downstream
+    # generator dataset, especially for small reproducible tuning experiments.
+    for field in ("dataset_type", "case_name"):
         if source_metadata.get(field) != metadata.get(field):
+            raise ValueError(f"DECS and Generator data differ in metadata field '{field}'")
+    for field in ("load_scale_min", "load_scale_max"):
+        if not np.isclose(
+            float(source_metadata.get(field, np.nan)),
+            float(metadata.get(field, np.nan)),
+        ):
             raise ValueError(f"DECS and Generator data differ in metadata field '{field}'")
     decs_sha256 = file_sha256(args.decs)
     for parameter in completion.parameters():
@@ -1566,8 +1662,28 @@ def main(benchmark: str = "csng") -> None:
         optimizer = torch.optim.Adam(
             model.parameters(), lr=args.stage2_learning_rate,
         )
+        scheduler = (
+            build_plateau_scheduler(
+                optimizer,
+                args.lr_decay_factor,
+                args.stage2_lr_decay_patience,
+                args.lr_min_delta,
+                args.stage2_min_learning_rate,
+            )
+            if args.lr_scheduler == "plateau" else None
+        )
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = (
+            build_plateau_scheduler(
+                optimizer,
+                args.lr_decay_factor,
+                args.stage1_lr_decay_patience,
+                args.lr_min_delta,
+                args.stage1_min_learning_rate,
+            )
+            if args.lr_scheduler == "plateau" else None
+        )
 
     print(f"{spec['method']} non-causal TCN training configuration")
     print(f"  device: {device}")
@@ -1626,6 +1742,12 @@ def main(benchmark: str = "csng") -> None:
         f"warmup={args.economic_warmup_epochs}, "
         f"cost_scale={'auto' if args.economic_cost_scale == 0 else f'{args.economic_cost_scale:.3f}'}, "
         f"grad_clip={'off' if args.max_grad_norm == 0 else args.max_grad_norm}"
+    )
+    print(
+        f"  LR schedule: {args.lr_scheduler}, factor={args.lr_decay_factor:g}, "
+        f"patience(stage1/stage2)={args.stage1_lr_decay_patience}/"
+        f"{args.stage2_lr_decay_patience}, min_lr(stage1/stage2)="
+        f"{args.stage1_min_learning_rate:.1e}/{args.stage2_min_learning_rate:.1e}"
     )
     print(
         "  stage 2 selection: validation best_feasible cost with hit_rate=1.000, "
@@ -1738,6 +1860,13 @@ def main(benchmark: str = "csng") -> None:
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "effective_batch_size": args.batch_size * args.gradient_accumulation_steps,
             "candidates": args.candidates,
+            "lr_scheduler": args.lr_scheduler,
+            "lr_decay_factor": args.lr_decay_factor,
+            "stage1_lr_decay_patience": args.stage1_lr_decay_patience,
+            "stage2_lr_decay_patience": args.stage2_lr_decay_patience,
+            "lr_min_delta": args.lr_min_delta,
+            "stage1_min_learning_rate": args.stage1_min_learning_rate,
+            "stage2_min_learning_rate": args.stage2_min_learning_rate,
         },
         "split": {
             "ratio": metadata["split"]["ratio"],
@@ -1819,6 +1948,7 @@ def main(benchmark: str = "csng") -> None:
             "best_validation_candidate_feasible": best_validation_candidate_feasible,
             "test_evaluated_during_training": False,
             "training_history": list(history),
+            "lr_scheduler_state": None if scheduler is None else scheduler.state_dict(),
         }, args.output)
 
     start_time = perf_counter()
@@ -1843,6 +1973,9 @@ def main(benchmark: str = "csng") -> None:
                 "training_phase": spec["stage1_training_phase"],
                 "best_validation_loss": stage1_best_loss,
                 "training_history": list(history),
+                "lr_scheduler_state": (
+                    None if scheduler is None else scheduler.state_dict()
+                ),
                 "early_stopping": {
                     "patience": None, "min_delta": args.min_delta,
                     "best_epoch": stage1_best_epoch,
@@ -1863,6 +1996,16 @@ def main(benchmark: str = "csng") -> None:
             optimizer = torch.optim.Adam(
                 model.parameters(), lr=args.stage2_learning_rate,
             )
+            scheduler = (
+                build_plateau_scheduler(
+                    optimizer,
+                    args.lr_decay_factor,
+                    args.stage2_lr_decay_patience,
+                    args.lr_min_delta,
+                    args.stage2_min_learning_rate,
+                )
+                if args.lr_scheduler == "plateau" else None
+            )
             best_loss, best_economic_cost = np.inf, np.inf
             best_state, best_epoch, stale_epochs = None, 0, 0
             best_validation_hit_rate = 0.0
@@ -1876,6 +2019,7 @@ def main(benchmark: str = "csng") -> None:
         # checkpoint losses remain comparable while the training weight warms up.
         validation_economic_weight = args.lambda_eco if use_economic else 0.0
 
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         train_metrics = run_epoch(
             model, completion, loaders["train"], free_lower, free_upper,
             free_ramp, reference_ramp, args, device, optimizer,
@@ -1925,9 +2069,16 @@ def main(benchmark: str = "csng") -> None:
         else:
             stale_epochs = 0
 
+        scheduler_active = scheduler is not None and warmup_complete
+        if scheduler_active:
+            scheduler.step(validation_metrics["loss"])
+        next_learning_rate = float(optimizer.param_groups[0]["lr"])
+
         history.append({
             "epoch": epoch, "economic_stage": use_economic,
-            "learning_rate": optimizer.param_groups[0]["lr"],
+            "learning_rate": learning_rate,
+            "next_learning_rate": next_learning_rate,
+            "lr_scheduler_active": scheduler_active,
             "train_lambda_eco_effective": train_economic_weight,
             "validation_lambda_eco": validation_economic_weight,
             "economic_cost_scale": args.economic_cost_scale,
@@ -1946,6 +2097,8 @@ def main(benchmark: str = "csng") -> None:
             status = f"no full-hit validation | stale {stale_epochs}/{args.patience}"
         else:
             status = f"stale {stale_epochs}/{args.patience}"
+        if next_learning_rate < learning_rate:
+            status += f" | lr -> {next_learning_rate:.2e}"
         print_epoch_metrics(
             epoch=epoch,
             total_epochs=args.epochs,
@@ -1953,7 +2106,7 @@ def main(benchmark: str = "csng") -> None:
             elapsed=elapsed,
             eta=eta,
             status=status,
-            learning_rate=optimizer.param_groups[0]["lr"],
+            learning_rate=learning_rate,
             feasibility_weight=args.lambda_fea,
             diversity_weight=args.lambda_div,
             train_economic_weight=train_economic_weight,

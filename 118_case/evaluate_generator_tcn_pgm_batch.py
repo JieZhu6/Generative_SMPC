@@ -1,10 +1,11 @@
-"""Evaluate Generator-TCN candidates with native Power Grid Model batches.
+"""Evaluate Generator-TCN candidates with PGM/fixed-PV batches.
 
 The data split, Generator checkpoint, latent seeds, operating constraints, and
 cost definition match :mod:`evaluate_generator_tcn`.  For each instance all
 candidate/scenario/time operating points are flattened into one native PGM
-batch.  A deterministic sample is independently recomputed by pandapower and
-saved as a numerical equivalence report.
+batch. Native failures or different solution branches use the matching
+fixed-PV high-voltage states. A deterministic sample is independently
+recomputed by pandapower and saved as a numerical equivalence report.
 """
 
 import argparse
@@ -202,6 +203,13 @@ def assess_candidate_batch(
         angle_violation, thermal_violation, ramp_violation,
     ])
     maximum_violation = violations.max(axis=1)
+    # A candidate containing any failed PGM point has no valid exact objective.
+    # Keep the remaining candidates usable instead of aborting the whole batch.
+    objective = np.where(pv_converged & np.isfinite(objective), objective, np.inf)
+    maximum_violation = np.where(
+        pv_converged & np.isfinite(maximum_violation), maximum_violation, np.inf,
+    )
+    balance = np.where(pv_converged & np.isfinite(balance), balance, np.inf)
     feasible = (
         pv_converged
         & (maximum_violation <= feasibility_tolerance)
@@ -314,7 +322,7 @@ def main(benchmark: str = "csng") -> None:
     """
     spec = get_benchmark_spec(benchmark)
     parser = argparse.ArgumentParser(
-        description=f"Evaluate {spec['method']} with native PGM batches.",
+        description=f"Evaluate {spec['method']} with PGM/fixed-PV batches.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
@@ -325,30 +333,38 @@ def main(benchmark: str = "csng") -> None:
         help="trained checkpoint for the selected benchmark",
     )
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--candidates", type=int, default=50)
-    parser.add_argument("--max-instances", type=int, default=None)
+    parser.add_argument("--candidates", type=int, default=100)
+    parser.add_argument("--max-instances", type=int, default=200)
     parser.add_argument("--ramp-fraction", type=float, default=0.25)
     parser.add_argument("--feasibility-tolerance", type=float, default=1.0e-4)
     parser.add_argument("--balance-tolerance-mva", type=float, default=1.0e-5)
     parser.add_argument("--pgm-error-tolerance", type=float, default=1.0e-8)
-    parser.add_argument("--max-pf-iterations", type=int, default=30)
+    parser.add_argument("--max-pf-iterations", type=int, default=50)
+    parser.add_argument(
+        "--fixed-pv-chunk-size", type=int, default=1024,
+        help="maximum fixed-PV Newton points per float64 dense batch",
+    )
     parser.add_argument(
         "--threading", type=int, default=0,
         help="PGM workers: -1 sequential, 0 all hardware threads, >0 exact count",
     )
     parser.add_argument(
-        "--verify-instances", type=int, default=0,
+        "--verify-instances", type=int, default=1,
         help="number of initial instances sampled for pandapower equivalence",
     )
     parser.add_argument(
-        "--verify-points", type=int, default=0,
+        "--verify-points", type=int, default=500,
         help="spread of PGM batch points compared per verification instance; 0 disables",
     )
     parser.add_argument("--pandapower-tolerance-mva", type=float, default=1.0e-8)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
-    if args.candidates < 1 or args.max_pf_iterations < 1:
+    if (
+        args.candidates < 1
+        or args.max_pf_iterations < 1
+        or args.fixed_pv_chunk_size < 1
+    ):
         raise ValueError("candidate and iteration counts must be positive")
     if args.verify_instances < 0 or args.verify_points < 0:
         raise ValueError("verification counts cannot be negative")
@@ -424,7 +440,7 @@ def main(benchmark: str = "csng") -> None:
     inference_warmup_seconds = perf_counter() - warmup_start
 
     print(
-        f"Generator-TCN native PGM batch: split={args.split}, "
+        f"Generator-TCN PGM/fixed-PV batch: split={args.split}, "
         f"instances={selected_count}, candidates={args.candidates}, device={device}",
         flush=True,
     )
@@ -461,6 +477,9 @@ def main(benchmark: str = "csng") -> None:
             pgm_error_tolerance=args.pgm_error_tolerance,
             pgm_max_iterations=args.max_pf_iterations,
             threading=args.threading,
+            continue_on_batch_error=True,
+            fixed_pv_chunk_size=args.fixed_pv_chunk_size,
+            fixed_pv_device=str(device),
         )
         assessed = assess_candidate_batch(
             case, loads, states, args.candidates, scenarios, horizon,
@@ -480,6 +499,24 @@ def main(benchmark: str = "csng") -> None:
         selected_candidate = (
             best_feasible_candidate if feasible else best_all_candidate
         )
+        point_success = np.asarray(states["batch_success"]).reshape(args.candidates, -1)
+        native_success = np.asarray(states["native_pgm_success"]).reshape(
+            args.candidates, -1,
+        )
+        wrong_branch = np.asarray(states["native_pgm_wrong_branch"]).reshape(
+            args.candidates, -1,
+        )
+        fallback_used = np.asarray(states["fixed_pv_fallback_used"]).reshape(
+            args.candidates, -1,
+        )
+        failed_batch_points = int(np.count_nonzero(~native_success))
+        failed_candidates = int(np.count_nonzero(~native_success.all(axis=1)))
+        wrong_branch_points = int(np.count_nonzero(wrong_branch))
+        wrong_branch_candidates = int(np.count_nonzero(wrong_branch.any(axis=1)))
+        fallback_points = int(np.count_nonzero(fallback_used))
+        fallback_candidates = int(np.count_nonzero(fallback_used.any(axis=1)))
+        final_failed_points = int(np.count_nonzero(~point_success))
+        final_failed_candidates = int(np.count_nonzero(~point_success.all(axis=1)))
         selected_cost = float(assessed["objective"][selected_candidate])
         selected_u[local_index] = schedules_np[selected_candidate]
         selected_pg[local_index] = assessed["pg_trajectory"][selected_candidate]
@@ -504,6 +541,14 @@ def main(benchmark: str = "csng") -> None:
             "feasible": int(feasible),
             "candidates": args.candidates,
             "feasible_candidates": int(len(feasible_indices)),
+            "pgm_failed_batch_points": failed_batch_points,
+            "pgm_failed_candidates": failed_candidates,
+            "native_pgm_wrong_branch_points": wrong_branch_points,
+            "native_pgm_wrong_branch_candidates": wrong_branch_candidates,
+            "fixed_pv_fallback_points": fallback_points,
+            "fixed_pv_fallback_candidates": fallback_candidates,
+            "final_failed_batch_points": final_failed_points,
+            "final_failed_candidates": final_failed_candidates,
             "best_candidate_index": selected_candidate,
             "best_feasible_candidate_index": best_feasible_candidate,
             "best_all_candidate_index": best_all_candidate,
@@ -516,6 +561,7 @@ def main(benchmark: str = "csng") -> None:
             "pgm_prepare_seconds": float(states["t_prepare"]),
             "pgm_power_flow_seconds": float(states["t_power_flow"]),
             "pgm_extract_seconds": float(states["t_extract"]),
+            "fixed_pv_newton_seconds": float(states["t_fixed_pv"]),
             "constraint_evaluation_seconds": constraint_seconds,
             "total_seconds": generation_seconds + evaluation_seconds,
             "batch_points": int(len(loads)),
@@ -533,6 +579,9 @@ def main(benchmark: str = "csng") -> None:
         print(
             f"[{local_index + 1:4d}/{selected_count}] instance={instance} "
             f"feasible={feasible} feasible_candidates={len(feasible_indices)}/{args.candidates} "
+            f"native_pgm_failed={failed_batch_points}/{len(loads)} "
+            f"wrong_branch={wrong_branch_points} fallback={fallback_points} "
+            f"final_failed={final_failed_points} "
             f"cost={format_reported_cost(row['all_cost'])} "
             f"total={row['total_seconds']:.3f}s",
             flush=True,
@@ -549,7 +598,7 @@ def main(benchmark: str = "csng") -> None:
         verification_reports and all(report["passed"] for report in verification_reports)
     ) if args.verify_points and args.verify_instances else None
     summary = {
-        "method": f"{spec['method']} + native Power Grid Model batch screening",
+        "method": f"{spec['method']} + PGM batch with fixed-PV high-voltage fallback",
         "benchmark": benchmark,
         "projection_method": spec["projection_method"],
         "diversity_loss_enabled": spec["diversity_loss_enabled"],
@@ -559,6 +608,12 @@ def main(benchmark: str = "csng") -> None:
         "n_instances": selected_count,
         "candidates_per_instance": args.candidates,
         "native_batch_points_per_instance": args.candidates * (1 + scenarios * (horizon - 1)),
+        "fixed_pv_formulation": (
+            "float64 full Newton high-voltage state + native PGM PQ batch; "
+            "native failures or different solution branches use the fixed-PV state"
+        ),
+        "fixed_pv_device": str(device),
+        "fixed_pv_chunk_size": args.fixed_pv_chunk_size,
         "feasible_instances": len(feasible_rows),
         "feasibility_rate": len(feasible_rows) / selected_count,
         "inference_warmup_seconds": inference_warmup_seconds,
@@ -574,6 +629,24 @@ def main(benchmark: str = "csng") -> None:
         "pgm_extract_seconds": finite_statistics(
             [row["pgm_extract_seconds"] for row in rows]
         ),
+        "pgm_failed_batch_points": finite_statistics(
+            [row["pgm_failed_batch_points"] for row in rows]
+        ),
+        "pgm_failed_candidates": finite_statistics(
+            [row["pgm_failed_candidates"] for row in rows]
+        ),
+        "native_pgm_wrong_branch_points": finite_statistics(
+            [row["native_pgm_wrong_branch_points"] for row in rows]
+        ),
+        "fixed_pv_fallback_points": finite_statistics(
+            [row["fixed_pv_fallback_points"] for row in rows]
+        ),
+        "final_failed_batch_points": finite_statistics(
+            [row["final_failed_batch_points"] for row in rows]
+        ),
+        "fixed_pv_newton_seconds": finite_statistics(
+            [row["fixed_pv_newton_seconds"] for row in rows]
+        ),
         "constraint_evaluation_seconds": finite_statistics(
             [row["constraint_evaluation_seconds"] for row in rows]
         ),
@@ -588,7 +661,7 @@ def main(benchmark: str = "csng") -> None:
         "seed": args.seed,
     }
     write_json(args.output_dir / "generator_pgm_summary.json", summary)
-    print(f"saved native PGM benchmark to {args.output_dir}")
+    print(f"saved PGM/fixed-PV benchmark to {args.output_dir}")
 
 
 if __name__ == "__main__":

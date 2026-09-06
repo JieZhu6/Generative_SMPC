@@ -1,9 +1,10 @@
 """Visualize DECS accuracy for system inequality-constraint decisions.
 
-The paper figure contains at most two horizontally arranged panels: normalized
-signed residual parity near the feasibility boundary and false feasible/false
-infeasible rates for the five dependent inequality blocks. Optional OOD
-experiments are written to the metrics JSON without adding figure panels.
+The paper figure contains two horizontally arranged panels: full-range
+normalized signed-residual parity and false feasible/false infeasible rates for
+the five dependent inequality blocks. The parity panel uses symmetric-log axes
+to retain both boundary detail and distant feasible/violating values. Optional
+OOD experiments are written to the metrics JSON without adding figure panels.
 """
 
 import argparse
@@ -466,7 +467,7 @@ def sample_pairs(
     max_points: int,
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Subsample flattened target/prediction pairs for readable scatter plots.
+    """Subsample pairs while retaining target and prediction extrema.
 
     Parameters
     ----------
@@ -480,15 +481,26 @@ def sample_pairs(
     Returns
     -------
     target_sample, prediction_sample : tuple[np.ndarray, np.ndarray]
-        Flattened arrays containing at most ``max_points`` entries.
+        Flattened arrays containing at most ``max_points`` entries. The four
+        target/prediction minimum/maximum pairs are retained when subsampling.
     """
     target_flat = target.reshape(-1)
     prediction_flat = prediction.reshape(-1)
     if len(target_flat) <= max_points:
         return target_flat, prediction_flat
-    indices = np.random.default_rng(seed).choice(
-        len(target_flat), size=max_points, replace=False,
+    extrema = np.unique([
+        np.argmin(target_flat), np.argmax(target_flat),
+        np.argmin(prediction_flat), np.argmax(prediction_flat),
+    ])
+    if max_points <= len(extrema):
+        return target_flat[extrema[:max_points]], prediction_flat[extrema[:max_points]]
+    candidates = np.setdiff1d(
+        np.arange(len(target_flat)), extrema, assume_unique=True,
     )
+    random_indices = np.random.default_rng(seed).choice(
+        candidates, size=max_points - len(extrema), replace=False,
+    )
+    indices = np.concatenate([extrema, random_indices])
     return target_flat[indices], prediction_flat[indices]
 
 
@@ -623,6 +635,57 @@ CONSTRAINT_BLOCKS = (
     ("thermal", r"$|S|$"),
 )
 
+CONSTRAINT_COLORS = {
+    "pg": "#D55E00",
+    "qg": "#0072B2",
+    "voltage": "#009E73",
+    "angle": "#CC79A7",
+    "thermal": "#E69F00",
+}
+
+
+def symmetric_log_ticks(
+    maximum_absolute: float,
+    linear_half_width: float,
+) -> tuple[np.ndarray, list[str]]:
+    """Return uncluttered signed decade ticks for a symmetric-log axis.
+
+    Parameters
+    ----------
+    maximum_absolute : float
+        Positive absolute plotting limit.
+    linear_half_width : float
+        Positive half-width of the central linear region.
+
+    Returns
+    -------
+    ticks, labels : tuple[np.ndarray, list[str]]
+        Symmetric ticks containing zero and decades no smaller than the linear
+        region, with compact base-10 labels.
+    """
+    minimum_exponent = math.ceil(math.log10(linear_half_width))
+    maximum_exponent = math.floor(math.log10(maximum_absolute))
+    exponents = np.arange(
+        minimum_exponent, max(minimum_exponent, maximum_exponent) + 1, 2,
+    )
+    if maximum_exponent > minimum_exponent and exponents[-1] != maximum_exponent:
+        exponents = np.append(exponents, maximum_exponent)
+    positive = np.power(10.0, exponents)
+    ticks = np.concatenate([-positive[::-1], [0.0], positive])
+
+    def label(exponent: int, sign: str = "") -> str:
+        """Format one signed decade tick without verbose decimal zeros."""
+        if exponent == 0:
+            return f"{sign}1"
+        return rf"${sign}10^{{{exponent}}}$"
+
+    labels = (
+        [label(int(exponent), "-") for exponent in exponents[::-1]]
+        + ["0"]
+        + [label(int(exponent)) for exponent in exponents]
+    )
+    return ticks, labels
+
 
 def constraint_decision_metrics(
     result: dict[str, np.ndarray],
@@ -661,16 +724,45 @@ def configure_publication_style() -> None:
     plt.rcParams.update({
         "font.family": "serif",
         "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
         "font.size": 8,
+        "font.weight": "normal",
         "axes.labelsize": 8.5,
-        "xtick.labelsize": 7.5,
-        "ytick.labelsize": 7.5,
+        "axes.labelweight": "normal",
+        "axes.titleweight": "normal",
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
         "legend.fontsize": 8,
         "axes.linewidth": 0.7,
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
         "savefig.facecolor": "white",
     })
+
+
+def save_publication_figure(
+    figure: plt.Figure,
+    output: Path,
+    dpi: int,
+) -> None:
+    """Export an IEEE figure as PNG, vector PDF, and LZW-compressed TIFF.
+
+    Parameters
+    ----------
+    figure : matplotlib.figure.Figure
+        Fully composed figure to export.
+    output : pathlib.Path
+        Output path whose stem is shared by all three formats.
+    dpi : int
+        Raster resolution in dots per inch; 600 is the publication default.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output.with_suffix(".png"), dpi=dpi)
+    figure.savefig(output.with_suffix(".pdf"))
+    figure.savefig(
+        output.with_suffix(".tiff"), dpi=dpi,
+        pil_kwargs={"compression": "tiff_lzw"},
+    )
 
 
 def plot_constraint_validation(
@@ -682,40 +774,84 @@ def plot_constraint_validation(
     seed: int,
     dpi: int,
 ) -> None:
-    """Save a two-panel inequality-residual validation figure."""
+    """Save full-range residual parity and inequality-decision errors.
+
+    Parameters
+    ----------
+    output : pathlib.Path
+        Destination PNG path.
+    result : dict[str, np.ndarray]
+        Target and predicted signed residual arrays for all constraint blocks.
+    metrics : dict[str, dict[str, float | int]]
+        Constraint-decision metrics in the same block order as the plot.
+    residual_window : float
+        Half-width of the linear region around zero; values outside it remain
+        visible on symmetric-log axes.
+    max_points : int
+        Maximum total scatter points, divided approximately equally among the
+        five constraint blocks.
+    seed : int
+        Reproducible point-subsampling seed.
+    dpi : int
+        Saved PNG resolution in dots per inch.
+    """
     configure_publication_style()
-    target_parts = []
-    prediction_parts = []
-    for name, _ in CONSTRAINT_BLOCKS:
+    n_blocks = len(CONSTRAINT_BLOCKS)
+    base_budget, extra_points = divmod(max_points, n_blocks)
+    sampled_parts = []
+    lower = math.inf
+    upper = -math.inf
+    for index, (name, label) in enumerate(CONSTRAINT_BLOCKS):
         target = np.asarray(result[f"constraint_{name}_target"], dtype=float).ravel()
         prediction = np.asarray(
             result[f"constraint_{name}_prediction"], dtype=float,
         ).ravel()
-        near_boundary = np.abs(target) <= residual_window
-        target_parts.append(target[near_boundary])
-        prediction_parts.append(prediction[near_boundary])
-    target = np.concatenate(target_parts)
-    prediction = np.concatenate(prediction_parts)
-    target, prediction = sample_pairs(target, prediction, max_points, seed)
+        lower = min(lower, float(target.min()), float(prediction.min()))
+        upper = max(upper, float(target.max()), float(prediction.max()))
+        budget = base_budget + int(index < extra_points)
+        target_sample, prediction_sample = sample_pairs(
+            target, prediction, budget, seed + index,
+        )
+        sampled_parts.append((name, label, target_sample, prediction_sample))
 
     figure, (parity_axis, decision_axis) = plt.subplots(
-        1, 2, figsize=(3.5, 2.05),
+        1, 2, figsize=(3.5, 2.15),
     )
-    parity_axis.scatter(
-        target, prediction, s=5, alpha=0.16, color="#0072B2", edgecolors="none",
-        rasterized=True,
-    )
-    limits = (-residual_window, residual_window)
-    parity_axis.plot(limits, limits, color="#D55E00", linestyle="--", linewidth=1.0)
+    for name, label, target, prediction in sampled_parts:
+        parity_axis.scatter(
+            target, prediction, s=3, alpha=0.20,
+            color=CONSTRAINT_COLORS[name], label=label, edgecolors="none",
+            rasterized=True,
+        )
+    maximum_absolute = max(abs(lower), abs(upper), residual_window) * 1.08
+    limits = (-maximum_absolute, maximum_absolute)
+    parity_axis.plot(limits, limits, color="#333333", linestyle="--", linewidth=1.0)
     parity_axis.axhline(0.0, color="#777777", linestyle=":", linewidth=0.7)
     parity_axis.axvline(0.0, color="#777777", linestyle=":", linewidth=0.7)
+    parity_axis.set_xscale(
+        "symlog", linthresh=residual_window, linscale=1.0, base=10,
+    )
+    parity_axis.set_yscale(
+        "symlog", linthresh=residual_window, linscale=1.0, base=10,
+    )
     parity_axis.set(
         xlim=limits, ylim=limits,
         xlabel="Target residual", ylabel="DECS residual",
     )
-    parity_axis.set_aspect("equal", adjustable="box")
+    ticks, tick_labels = symmetric_log_ticks(maximum_absolute, residual_window)
+    parity_axis.set_xticks(ticks, tick_labels)
+    parity_axis.set_yticks(ticks, tick_labels)
+    parity_axis.set_box_aspect(1.0)
+    parity_axis.legend(
+        loc="upper left", bbox_to_anchor=(0.02, 0.98),
+        frameon=True, facecolor="white", edgecolor="none", framealpha=0.94,
+        ncol=1, handlelength=1.0, handletextpad=0.25,
+        labelspacing=0.05, borderpad=0.08,
+        borderaxespad=0.0, markerscale=1.5,
+    )
     parity_axis.text(
-        0.5, -0.31, "(a) Boundary parity", transform=parity_axis.transAxes,
+        0.5, -0.33, "(a) Residual parity",
+        transform=parity_axis.transAxes,
         ha="center", va="top", fontsize=8.5,
     )
 
@@ -747,7 +883,7 @@ def plot_constraint_validation(
     )
     decision_axis.set_box_aspect(1.0)
     decision_axis.text(
-        0.5, -0.31, "(b) Decision errors", transform=decision_axis.transAxes,
+        0.5, -0.33, "(b) Decision errors", transform=decision_axis.transAxes,
         ha="center", va="top", fontsize=8.5,
     )
 
@@ -756,15 +892,9 @@ def plot_constraint_validation(
         axis.spines["right"].set_visible(False)
         axis.tick_params(direction="out", length=2.5, width=0.65)
     figure.subplots_adjust(
-        left=0.15, right=0.99, top=0.98, bottom=0.28, wspace=0.52,
+        left=0.15, right=0.99, top=0.98, bottom=0.31, wspace=0.52,
     )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output, dpi=dpi)
-    figure.savefig(output.with_suffix(".pdf"))
-    figure.savefig(
-        output.with_suffix(".tiff"), dpi=dpi,
-        pil_kwargs={"compression": "tiff_lzw"},
-    )
+    save_publication_figure(figure, output, dpi)
     plt.close(figure)
 
 
@@ -943,7 +1073,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--residual-window", type=float, default=0.3,
-        help="absolute normalized-residual range shown around the constraint boundary",
+        help=(
+            "half-width of the linear region around zero on the full-range "
+            "symmetric-log residual axes"
+        ),
     )
     parser.add_argument(
         "--decision-tolerance", type=float, default=1e-4,
@@ -1001,7 +1134,12 @@ def main() -> None:
     protocol = {
         "residual_definition": "normalized signed residual; <= tolerance is feasible",
         "decision_tolerance": args.decision_tolerance,
-        "boundary_plot_window": args.residual_window,
+        "residual_plot": {
+            "scale": "symmetric_log",
+            "linear_half_width": args.residual_window,
+            "sampling": "equal point budget per constraint block with extrema retained",
+            "maximum_points": args.max_points,
+        },
         "evaluated_inequality_blocks": {
             "pg": "reference-generator active-power limits",
             "qg": "generator reactive-power limits",

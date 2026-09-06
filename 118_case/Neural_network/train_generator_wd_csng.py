@@ -1,4 +1,4 @@
-"""Train the WD-CSNG benchmark without the diversity-preservation loss."""
+"""Train WD-CSNG with shared defaults and no diversity-preservation loss."""
 
 import sys
 from pathlib import Path
@@ -11,7 +11,7 @@ from Neural_network.train_generator import main as run_generator_training
 
 
 def main() -> None:
-    """Run feasibility/economic WD-CSNG training with no diversity term."""
+    """Run WD-CSNG through the shared training entry point without diversity."""
     run_generator_training("wd_csng")
 
 
