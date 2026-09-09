@@ -1,10 +1,10 @@
-# End-to-End Stochastic Model Predictive Dispatch for ACOPF Using Generative Models
+# Stochastic Model Predictive Control under AC Power-Flow Constraints Using Generative Learning
 
-Official training and evaluation code for the manuscript:
+Official training and evaluation code for the arXiv preprint:
 
-> **End-to-End Stochastic Model Predictive Dispatch for ACOPF Using Generative Models**  
-> Jie Zhu and Yinliang Xu  
-> Tsinghua Shenzhen International Graduate School, Tsinghua University
+> **[Stochastic Model Predictive Control under AC Power-Flow Constraints Using Generative Learning](https://arxiv.org/abs/2609.07433)**<br>
+> Jie Zhu, Yinliang Xu, and Guan Wang<br>
+> arXiv:2609.07433 [eess.SY], 2026
 
 This repository implements a conditional stochastic neural generator (CSNG) for multi-period, multi-scenario stochastic model predictive control (SMPC) under nonlinear AC power-flow constraints. Given an uncertainty instance, CSNG generates multiple dispatch trajectories, validates them with the original AC power-flow model, and selects the lowest-cost feasible candidate.
 
@@ -293,12 +293,16 @@ For the IEEE 118-bus sensitivity study, all test instances recover at least one 
 
 ## Citation
 
-If you use this repository, please cite the manuscript. Replace the entry below with the final journal metadata after publication.
+If you use this repository, please cite the arXiv preprint:
 
 ```bibtex
-@article{zhu_end_to_end_smpc,
-  author  = {Jie Zhu and Yinliang Xu},
-  title   = {End-to-End Stochastic Model Predictive Dispatch for ACOPF Using Generative Models},
-  note    = {Manuscript},
+@misc{zhu2026stochastic,
+  title         = {Stochastic Model Predictive Control under AC Power-Flow Constraints Using Generative Learning},
+  author        = {Jie Zhu and Yinliang Xu and Guan Wang},
+  year          = {2026},
+  eprint        = {2609.07433},
+  archivePrefix = {arXiv},
+  primaryClass  = {eess.SY},
+  url           = {https://arxiv.org/abs/2609.07433},
 }
 ```
