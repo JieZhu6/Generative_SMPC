@@ -1,10 +1,6 @@
-# Stochastic Model Predictive Control under AC Power-Flow Constraints Using Generative Learning
+# SMPC Training and Evaluation Code
 
-Official training and evaluation code for the arXiv preprint:
-
-> **[Stochastic Model Predictive Control under AC Power-Flow Constraints Using Generative Learning](https://arxiv.org/abs/2609.07433)**<br>
-> Jie Zhu, Yinliang Xu, and Guan Wang<br>
-> arXiv:2609.07433 [eess.SY], 2026
+Training and evaluation code accompanying a manuscript submitted for double-blind review. Author information, identifying publication details, and citation metadata are omitted during review.
 
 This repository implements a conditional stochastic neural generator (CSNG) for multi-period, multi-scenario stochastic model predictive control (SMPC) under nonlinear AC power-flow constraints. Given an uncertainty instance, CSNG generates multiple dispatch trajectories, validates them with the original AC power-flow model, and selects the lowest-cost feasible candidate.
 
@@ -41,7 +37,7 @@ Here, `*` denotes either `14_case` or `118_case`.
 ## Repository structure
 
 ```text
-Generative_SMPC/
+smpc-review-code/
 |-- 14_case/
 |   |-- Data_generation/       # IEEE 14-bus data and AC-PF labels
 |   |-- Neural_network/        # DECS, CSNG, baselines, and checkpoints
@@ -66,18 +62,20 @@ More detailed Chinese documentation is available in:
 
 ## Installation
 
-### 1. Clone the repository and download LFS data
+### 1. Obtain the review code and data
 
-Several large training arrays are stored with Git LFS.
+Obtain the code and data from the supplementary materials or anonymous link provided with the submission, and open a terminal in the project directory. An archive must include the actual training arrays rather than Git LFS pointer files.
+
+If the materials are supplied as an anonymous Git repository, replace `<ANONYMOUS_REPOSITORY_URL>` below with the provided review URL. Several large training arrays are stored with Git LFS.
 
 ```bash
 git lfs install
-git clone https://github.com/JieZhu6/Generative_SMPC.git
-cd Generative_SMPC
+git clone <ANONYMOUS_REPOSITORY_URL> smpc-review-code
+cd smpc-review-code
 git lfs pull
 ```
 
-Without `git lfs pull`, the large `.npy` files will remain small pointer files and training will fail.
+For a Git clone, run `git lfs pull` to ensure the large `.npy` files contain the actual arrays rather than small pointer files. This command is not needed for an archive that already includes the arrays.
 
 ### 2. Create the Python environment
 
@@ -290,19 +288,3 @@ For the IEEE 118-bus sensitivity study, all test instances recover at least one 
 - Generated candidates are screened in parallel, and the lowest-cost feasible candidate is selected.
 - Checkpoint compatibility depends on the dataset dimensions and normalization parameters. Keep each checkpoint with the corresponding dataset metadata.
 - Full training can be memory intensive because each instance expands across candidates, scenarios, and time periods. Reduce the micro-batch size or use gradient accumulation instead of changing the network or constraint set.
-
-## Citation
-
-If you use this repository, please cite the arXiv preprint:
-
-```bibtex
-@misc{zhu2026stochastic,
-  title         = {Stochastic Model Predictive Control under AC Power-Flow Constraints Using Generative Learning},
-  author        = {Jie Zhu and Yinliang Xu and Guan Wang},
-  year          = {2026},
-  eprint        = {2609.07433},
-  archivePrefix = {arXiv},
-  primaryClass  = {eess.SY},
-  url           = {https://arxiv.org/abs/2609.07433},
-}
-```

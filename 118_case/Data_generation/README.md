@@ -16,14 +16,14 @@ chi = [theta_PV, theta_PQ, V_PQ]                       [N,181]
 
 ## 默认 Python 环境
 
-本文所有命令默认使用以下 UV 管理的 CPython 3.12.12 环境：
+本文所有命令默认在已激活的 Python 3.12 环境中执行。请从 `118_case`
+目录运行以下命令，并在当前 PowerShell 会话中设置：
 
 ```powershell
-$IEEE118_PYTHON = "C:/Users/JieZhu/AppData/Roaming/uv/python/cpython-3.12.12-windows-x86_64-none/python.exe"
+$IEEE118_PYTHON = "python"
 ```
 
-请先在当前 PowerShell 会话中执行上述赋值，后续命令统一通过
-`& $IEEE118_PYTHON` 调用该解释器。
+后续命令统一通过 `& $IEEE118_PYTHON` 调用当前环境的解释器。
 
 ## 1. 生成 SMPC 负荷场景
 

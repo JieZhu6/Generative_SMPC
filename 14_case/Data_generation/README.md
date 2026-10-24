@@ -4,16 +4,13 @@
 冻结的 DECS 集成到 conditional neural ODE generator。代码采用简洁的论文复现
 结构：基础负荷数据、pandapower 潮流标签、DECS 训练、generator 训练。
 
-本文档中的命令默认使用以下 UV Python 3.12.12 解释器：
-
-```text
-C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe
-```
+本文档中的命令默认在已激活的 Python 3.12 环境中执行，使用 `python`
+调用当前环境的解释器。请从 `14_case` 目录运行以下命令。
 
 ## 1. 生成 SMPC 负荷场景
 
 ```powershell
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Data_generation/generate_smpc_dataset.py `
+python Data_generation/generate_smpc_dataset.py `
     --n-instances 1000 --n-scenarios 20 --horizon 16
 ```
 
@@ -34,7 +31,7 @@ split/{train,validation,test}_indices.npy
 ## 2. 用 PGM batch 生成固定 PV 的 DECS 标签
 
 ```powershell
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Data_generation/generate_decs_dataset.py `
+python Data_generation/generate_decs_dataset.py `
     --base-data Data_generation/data/e2e14_N5000_S20_T16 `
     --n-samples 10000 --batch-size 1000 `
     --load-range-extension 0.02 --free-range-extension 0.05
@@ -62,7 +59,7 @@ chi = [theta_PV, theta_PQ, V_PQ]         [N,22]
 ## 3. 训练 DECS
 
 ```powershell
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Neural_network/train_decs.py `
+python Neural_network/train_decs.py `
     --data Data_generation/data/e2e14_decs_pgm_fixedpv_N10000 `
     --hidden-dims 128 128 --lambda-physics 1.0 `
     --patience 30 --min-delta 0.0
@@ -75,7 +72,7 @@ PF 残差。
 早停只依据验证集总损失；测试集损失仅监控，不参与模型选择。验证效果可视化：
 
 ```powershell
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Neural_network/validation/decs/visualize_decs_validation.py `
+python Neural_network/validation/decs/visualize_decs_validation.py `
     --data Data_generation/data/e2e14_decs_N10000 `
     --checkpoint Neural_network/decs.pt `
     --output Neural_network/validation/decs/decs_validation.png `
@@ -94,7 +91,7 @@ pandapower 重新求解 AC 潮流生成标签：负荷 OOD 默认外扩训练负
 ## 4. 训练 generator
 
 ```powershell
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Neural_network/train_generator.py `
+python Neural_network/train_generator.py `
     --data Data_generation/data/e2e14_base_N5000_S20_T16 `
     --decs Neural_network/decs.pt
 ```
@@ -105,15 +102,15 @@ Newton 潮流求解或 Jacobian 线性系统。pandapower 仅用于离线生成 
 ## 5. 小规模验证
 
 ```powershell
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Data_generation/generate_decs_dataset.py `
+python Data_generation/generate_decs_dataset.py `
     --base-data Data_generation/data/e2e14_base_N5000_S20_T16 `
     --n-samples 128 --output Data_generation/data/decs_smoke
 
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Neural_network/train_decs.py `
+python Neural_network/train_decs.py `
     --data Data_generation/data/decs_smoke --epochs 2 --patience 2 `
     --batch-size 32 --output Neural_network/decs_smoke.pt
 
-& "C:\Users\JieZhu\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\python.exe" Neural_network/train_generator.py `
+python Neural_network/train_generator.py `
     --decs Neural_network/decs_smoke.pt --epochs 1 --stage1-epochs 1 `
     --candidates 2 --ode-steps 1 --output Neural_network/generator_smoke.pt
 ```
